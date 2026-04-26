@@ -1,11 +1,11 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: apt-repo
-  namespace: apt-repo
+  name: bulmer-apt
+  namespace: bulmer-apt
 spec:
   selector:
-    app: apt-repo
+    app: bulmer-apt
   ports:
     - port: 80
-      targetPort: 80
+      targetPort: 8080
