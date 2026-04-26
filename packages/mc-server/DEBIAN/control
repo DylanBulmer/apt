@@ -1,0 +1,18 @@
+Package: mc-server
+Version: 0.1.0
+Architecture: all
+Maintainer: Dylan Bulmer <dylan@bulmer.dev>
+Depends: curl, jq
+Recommends: rsync, mc-rcon
+Section: admin
+Priority: optional
+Homepage: https://apt.bulmer.dev
+Description: Minecraft server lifecycle manager
+ mc-server manages a Minecraft server instance on bare-metal or inside VMs/LXC
+ containers. It supports Paper, Vanilla, and Fabric server types and provides
+ commands for installation, updates, backups, restores, and systemd lifecycle
+ management.
+ .
+ Requires Java 17+ (Java 21 recommended for Minecraft 1.20.5+).
+ .
+ Install mc-rcon to add the 'mc rcon' subcommand for RCON console access.

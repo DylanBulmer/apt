@@ -1,0 +1,18 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: apt-repo
+  namespace: apt-repo
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: apt.bulmer.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: apt-repo
+                port:
+                  number: 80

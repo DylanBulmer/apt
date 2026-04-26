@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=/usr/lib/mc/lib.sh
+source /usr/lib/mc/lib.sh
+
+# Load installed command plugins (e.g. mc-rcon adds 'rcon')
+for _plugin in /usr/lib/mc/commands.d/*.sh; do
+    [[ -f "$_plugin" ]] && source "$_plugin"
+done
+unset _plugin
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    install) cmd_install "$@" ;;
+    update)  cmd_update  "$@" ;;
+    start)   cmd_start   "$@" ;;
+    stop)    cmd_stop    "$@" ;;
+    restart) cmd_restart "$@" ;;
+    status)  cmd_status  "$@" ;;
+    backup)  cmd_backup  "$@" ;;
+    restore) cmd_restore "$@" ;;
+    logs)    cmd_logs    "$@" ;;
+    delete)  cmd_delete  "$@" ;;
+    help|--help|-h) usage ;;
+    *)
+        if declare -f "cmd_${cmd}" >/dev/null 2>&1; then
+            "cmd_${cmd}" "$@"
+        else
+            error "Unknown command: $cmd"
+            usage
+            exit 1
+        fi
+        ;;
+esac

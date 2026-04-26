@@ -1,0 +1,8 @@
+dist/
+staging/
+packages/
+repo/conf/
+repo/db/
+.git/
+*.swp
+*~

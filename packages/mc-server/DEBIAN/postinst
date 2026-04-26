@@ -1,0 +1,42 @@
+#!/bin/bash
+set -e
+
+MC_USER="minecraft"
+MC_BASE="/opt/minecraft"
+MC_BACKUP="/var/backups/minecraft"
+MC_CONFIG="/etc/minecraft"
+
+case "$1" in
+    configure)
+        # Create minecraft system group and user if they don't exist
+        if ! getent group "$MC_USER" &>/dev/null; then
+            groupadd --system "$MC_USER"
+        fi
+        if ! id "$MC_USER" &>/dev/null; then
+            useradd --system \
+                --gid "$MC_USER" \
+                --home-dir "$MC_BASE" \
+                --shell /usr/sbin/nologin \
+                --comment "Minecraft server manager" \
+                "$MC_USER"
+        fi
+
+        # Create base directories
+        for dir in "$MC_BASE" "$MC_BACKUP"; do
+            mkdir -p "$dir"
+            chown "$MC_USER:$MC_USER" "$dir"
+            chmod 755 "$dir"
+        done
+
+        # Config dir: root-owned, world-readable
+        mkdir -p "$MC_CONFIG"
+        chown root:root "$MC_CONFIG"
+        chmod 755 "$MC_CONFIG"
+
+        if command -v systemctl &>/dev/null && systemctl is-system-running --quiet 2>/dev/null; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+esac
+
+exit 0

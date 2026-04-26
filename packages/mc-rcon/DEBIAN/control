@@ -1,0 +1,12 @@
+Package: mc-rcon
+Version: 0.1.0
+Architecture: amd64
+Maintainer: Dylan Bulmer <dylan@bulmer.dev>
+Depends: mc-server
+Section: admin
+Priority: optional
+Homepage: https://apt.bulmer.dev
+Description: RCON subcommand plugin for mc-server
+ mc-rcon adds the 'mc rcon' subcommand to the mc CLI, providing interactive
+ RCON console access and single-command execution against a running Minecraft
+ server. Implemented in C with no runtime dependencies beyond mc-server.

@@ -1,0 +1,24 @@
+# Built packages and staging trees
+dist/
+staging/
+
+# Compiled binaries inside source tree
+packages/*/src/mcrcon
+
+# reprepro state (generated, not source-controlled)
+repo/db/
+repo/dists/
+repo/pool/
+
+# NEVER commit the GPG private key — use a GitHub Actions secret instead.
+# Export with: gpg --armor --export-secret-key KEY_ID | base64
+# The PUBLIC key (repo/bulmer.asc) is intentionally tracked.
+*.secret.asc
+*.private.asc
+private-key.*
+secring.*
+
+# Editor cruft
+.vscode/
+*.swp
+*~

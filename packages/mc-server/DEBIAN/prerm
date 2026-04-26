@@ -1,0 +1,15 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove|purge)
+        if command -v systemctl &>/dev/null; then
+            for svc in $(systemctl list-units 'minecraft@*.service' --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
+                systemctl stop "$svc" 2>/dev/null || true
+                systemctl disable "$svc" 2>/dev/null || true
+            done
+        fi
+        ;;
+esac
+
+exit 0
