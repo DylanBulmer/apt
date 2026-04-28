@@ -1,7 +1,7 @@
 CC      = gcc
 CFLAGS  = -O2 -Wall -Wextra -std=c11 -D_POSIX_C_SOURCE=200809L
-TARGET  = mcrcon
-SRC     = mcrcon.c
+TARGET  = rcon
+SRC     = rcon.c
 
 DESTDIR ?= /usr/local
 

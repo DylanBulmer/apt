@@ -3,12 +3,42 @@
 set -euo pipefail
 
 # ── GC flag presets ────────────────────────────────────────────────────────────
+#
+# Java 8  → FLAGS_G1GC_JAVA8   Aikar's G1GC; UnlockExperimentalVMOptions is
+#                               required because several tuning flags were still
+#                               marked experimental in Java 8.
+# Java 17 → FLAGS_G1GC_JAVA17  Same Aikar flags without UnlockExperimentalVMOptions;
+#                               those options became stable in Java 9–11 and the
+#                               unlock flag could silently enable other experimental
+#                               behaviour in newer runtimes.
+# Java 21 → FLAGS_ZGC           Generational ZGC; -XX:+ZGenerational was introduced
+# Java 25 →                     as experimental in Java 21 and became the ZGC default
+#                               in Java 23, but specifying it is valid on all versions.
 
-FLAGS_G1GC="\
+FLAGS_G1GC_JAVA8="\
 -XX:+UseG1GC \
 -XX:+ParallelRefProcEnabled \
 -XX:MaxGCPauseMillis=200 \
 -XX:+UnlockExperimentalVMOptions \
+-XX:+DisableExplicitGC \
+-XX:+AlwaysPreTouch \
+-XX:G1NewSizePercent=30 \
+-XX:G1MaxNewSizePercent=40 \
+-XX:G1HeapRegionSize=8M \
+-XX:G1ReservePercent=20 \
+-XX:G1HeapWastePercent=5 \
+-XX:G1MixedGCCountTarget=4 \
+-XX:InitiatingHeapOccupancyPercent=15 \
+-XX:G1MixedGCLiveThresholdPercent=90 \
+-XX:G1RSetUpdatingPauseTimePercent=5 \
+-XX:SurvivorRatio=32 \
+-XX:+PerfDisableSharedMem \
+-XX:MaxTenuringThreshold=1"
+
+FLAGS_G1GC_JAVA17="\
+-XX:+UseG1GC \
+-XX:+ParallelRefProcEnabled \
+-XX:MaxGCPauseMillis=200 \
 -XX:+DisableExplicitGC \
 -XX:+AlwaysPreTouch \
 -XX:G1NewSizePercent=30 \
@@ -96,10 +126,12 @@ fi
 
 if [[ -z "$SERVER_FLAGS" ]]; then
     ACTUAL_VER=$(java_major_version "$JAVA_BIN" 2>/dev/null || echo "17")
-    if [[ "$ACTUAL_VER" -ge 21 ]]; then
-        SERVER_FLAGS="$FLAGS_ZGC"
+    if   [[ "$ACTUAL_VER" -ge 21 ]]; then
+        SERVER_FLAGS="$FLAGS_ZGC"           # Java 21, 25
+    elif [[ "$ACTUAL_VER" -ge 17 ]]; then
+        SERVER_FLAGS="$FLAGS_G1GC_JAVA17"   # Java 17
     else
-        SERVER_FLAGS="$FLAGS_G1GC"
+        SERVER_FLAGS="$FLAGS_G1GC_JAVA8"    # Java 8
     fi
 fi
 

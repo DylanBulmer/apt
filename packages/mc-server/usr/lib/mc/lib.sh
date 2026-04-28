@@ -156,7 +156,7 @@ is_running() {
 # ── RCON helpers ───────────────────────────────────────────────────────────────
 
 rcon_available() {
-    [[ -f "$PASSWD_FILE" ]] && command -v mcrcon >/dev/null 2>&1
+    [[ -f "$PASSWD_FILE" ]] && command -v rcon >/dev/null 2>&1
 }
 
 generate_rcon_password() {
@@ -170,7 +170,7 @@ rcon_command() {
     local port=$((SERVER_PORT + 10))
     local password
     password=$(cat "$PASSWD_FILE")
-    mcrcon 127.0.0.1 "$port" "$password" "$@" 2>/dev/null
+    rcon 127.0.0.1 "$port" "$password" "$@" 2>/dev/null
 }
 
 # ── server.properties helpers ──────────────────────────────────────────────────

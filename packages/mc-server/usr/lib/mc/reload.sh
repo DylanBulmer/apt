@@ -11,8 +11,8 @@ if [[ ! -f "$PASSWD_FILE" ]]; then
     exit 1
 fi
 
-if ! command -v mcrcon >/dev/null 2>&1; then
-    echo "[mc] mcrcon not found. Install mc-rcon: apt install mc-rcon" >&2
+if ! command -v rcon >/dev/null 2>&1; then
+    echo "[mc] rcon not found. Install mc-rcon: apt install mc-rcon" >&2
     exit 1
 fi
 
@@ -21,4 +21,4 @@ SERVER_PORT="25565"
 RCON_PORT=$((SERVER_PORT + 10))
 
 password=$(cat "$PASSWD_FILE")
-mcrcon 127.0.0.1 "$RCON_PORT" "$password" "reload"
+rcon 127.0.0.1 "$RCON_PORT" "$password" "reload"

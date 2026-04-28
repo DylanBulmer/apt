@@ -14,17 +14,17 @@ RCON_PORT=$((SERVER_PORT + 10))
 rcon_say() {
     local password
     password=$(cat "$PASSWD_FILE")
-    mcrcon 127.0.0.1 "$RCON_PORT" "$password" "say $*" 2>/dev/null || true
+    rcon 127.0.0.1 "$RCON_PORT" "$password" "say $*" 2>/dev/null || true
 }
 
 rcon_exec() {
     local password
     password=$(cat "$PASSWD_FILE")
-    mcrcon 127.0.0.1 "$RCON_PORT" "$password" "$*" 2>/dev/null || true
+    rcon 127.0.0.1 "$RCON_PORT" "$password" "$*" 2>/dev/null || true
 }
 
 # Only run the warning sequence if RCON is configured and reachable.
-if [[ -f "$PASSWD_FILE" ]] && command -v mcrcon >/dev/null 2>&1; then
+if [[ -f "$PASSWD_FILE" ]] && command -v rcon >/dev/null 2>&1; then
     rcon_say "[Server] Shutting down in 5 minutes."
     sleep 120
     rcon_say "[Server] Shutting down in 3 minutes."

@@ -12,6 +12,6 @@ cmd_rcon() {
     local password
     password=$(cat "$PASSWD_FILE")
 
-    # With no extra args, mcrcon opens an interactive session.
-    exec mcrcon 127.0.0.1 "$port" "$password" "$@"
+    # With no extra args, rcon opens an interactive session.
+    exec rcon 127.0.0.1 "$port" "$password" "$@"
 }
