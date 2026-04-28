@@ -1,0 +1,30 @@
+[Unit]
+Description=Minecraft Server
+After=network.target
+Documentation=https://apt.bulmer.dev
+
+[Service]
+Type=simple
+User=minecraft
+Group=minecraft
+WorkingDirectory=/opt/minecraft
+
+ExecStart=/usr/lib/mc/start.sh
+ExecStop=/usr/lib/mc/stop.sh
+ExecReload=/usr/lib/mc/reload.sh
+
+# Allow up to 5 min 30 s for the graceful shutdown sequence (5-min countdown
+# + 30 s buffer) before systemd sends SIGKILL.
+TimeoutStopSec=330s
+TimeoutStartSec=60s
+
+# Only kill the main process; ExecStop handles the rest.
+KillMode=process
+
+SuccessExitStatus=0 1
+Restart=on-failure
+RestartSec=10s
+RestartPreventExitStatus=0
+
+[Install]
+WantedBy=multi-user.target

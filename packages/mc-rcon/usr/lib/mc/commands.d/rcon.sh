@@ -2,20 +2,16 @@
 # mc-rcon plugin: adds the 'rcon' subcommand to mc
 
 cmd_rcon() {
-    require_name "${1:-}"
-    local name="$1"
-    shift || true
-    require_server "$name"
-    is_running "$name" || die "Server '$name' is not running."
+    require_server
+    is_running || die "Server is not running."
 
-    local passwd_file="$MC_CONFIG/${name}.passwd"
-    [[ -f "$passwd_file" ]] || die "No RCON password file: $passwd_file"
+    [[ -f "$PASSWD_FILE" ]] || die "RCON is not enabled. Install mc-rcon first, then run: mc install"
 
-    load_config "$name"
+    load_config
     local port=$((SERVER_PORT + 10))
     local password
-    password=$(cat "$passwd_file")
+    password=$(cat "$PASSWD_FILE")
 
-    # With no extra args, mcrcon opens an interactive session
+    # With no extra args, mcrcon opens an interactive session.
     exec mcrcon 127.0.0.1 "$port" "$password" "$@"
 }

@@ -10,26 +10,26 @@ for _plugin in /usr/lib/mc/commands.d/*.sh; do
 done
 unset _plugin
 
-cmd="${1:-help}"
+_MC_CMD="${1:-help}"
 shift || true
 
-case "$cmd" in
-    install) cmd_install "$@" ;;
-    update)  cmd_update  "$@" ;;
-    start)   cmd_start   "$@" ;;
-    stop)    cmd_stop    "$@" ;;
-    restart) cmd_restart "$@" ;;
-    status)  cmd_status  "$@" ;;
-    backup)  cmd_backup  "$@" ;;
-    restore) cmd_restore "$@" ;;
-    logs)    cmd_logs    "$@" ;;
-    delete)  cmd_delete  "$@" ;;
+case "$_MC_CMD" in
+    install) cmd_install  "$@" ;;
+    upgrade) cmd_upgrade  "$@" ;;
+    start)   cmd_start        ;;
+    stop)    cmd_stop         ;;
+    restart) cmd_restart      ;;
+    status)  cmd_status       ;;
+    backup)  cmd_backup       ;;
+    restore) cmd_restore  "$@" ;;
+    logs)    cmd_logs         ;;
+    delete)  cmd_delete       ;;
     help|--help|-h) usage ;;
     *)
-        if declare -f "cmd_${cmd}" >/dev/null 2>&1; then
-            "cmd_${cmd}" "$@"
+        if declare -f "cmd_${_MC_CMD}" >/dev/null 2>&1; then
+            "cmd_${_MC_CMD}" "$@"
         else
-            error "Unknown command: $cmd"
+            error "Unknown command: $_MC_CMD"
             usage
             exit 1
         fi

@@ -33,8 +33,17 @@ case "$1" in
         chown root:root "$MC_CONFIG"
         chmod 755 "$MC_CONFIG"
 
+        # Ensure new scripts are executable
+        for script in /usr/lib/mc/start.sh /usr/lib/mc/stop.sh /usr/lib/mc/reload.sh; do
+            [[ -f "$script" ]] && chmod 755 "$script"
+        done
+
         if command -v systemctl &>/dev/null && systemctl is-system-running --quiet 2>/dev/null; then
             systemctl daemon-reload || true
+
+            # Enable and start the backup timer
+            systemctl enable minecraft-backup.timer || true
+            systemctl start  minecraft-backup.timer 2>/dev/null || true
         fi
         ;;
 esac

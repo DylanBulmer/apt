@@ -1,18 +1,20 @@
 Package: mc-server
-Version: 0.1.0
+Version: 0.2.0
 Architecture: all
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
-Depends: curl, jq
+Depends: curl, jq, unzip
 Recommends: rsync, mc-rcon
 Section: admin
 Priority: optional
 Homepage: https://apt.bulmer.dev
 Description: Minecraft server lifecycle manager
- mc-server manages a Minecraft server instance on bare-metal or inside VMs/LXC
- containers. It supports Paper, Vanilla, and Fabric server types and provides
- commands for installation, updates, backups, restores, and systemd lifecycle
- management.
+ mc-server manages a single Minecraft server instance on bare-metal or inside
+ VMs/LXC containers. It supports Vanilla (default), Paper, Fabric, and NeoForge
+ server types and provides commands for installation, upgrades, backups, restores,
+ and systemd lifecycle management. Supports Modrinth .mrpack modpack files.
  .
- Requires Java 17+ (Java 21 recommended for Minecraft 1.20.5+).
+ Java version (8, 17, 21, or 25) is selected automatically based on the
+ requested Minecraft version, including Mojang's new 26.x versioning scheme.
  .
- Install mc-rcon to add the 'mc rcon' subcommand for RCON console access.
+ RCON is disabled by default. Install mc-rcon to enable the RCON console and
+ enable the 'mc rcon' subcommand.

@@ -19,7 +19,7 @@ sudo apt update
 ### `mc-server`
 
 Manages a Minecraft server instance on bare-metal or inside VMs/LXC containers.
-Supports Paper, Vanilla, and Fabric server types with systemd-based lifecycle management,
+Supports Paper, Vanilla, Fabric, and NeoForge server types with systemd-based lifecycle management,
 automated backups, and multi-version Java support.
 
 ```bash
@@ -32,20 +32,25 @@ you exactly which version to install for your chosen Minecraft version.
 **Commands**
 
 ```
-mc install <name>          Download and configure the server jar
-mc update <name>           Update to the latest build
-mc start <name>            Start the server
-mc stop <name>             Stop the server gracefully
-mc restart <name>          Restart the server
-mc status <name>           Show systemd service status
-mc backup <name>           Create a timestamped backup
-mc restore <name> <file>   Restore from a backup archive
-mc logs <name>             Follow the server log
-mc delete <name>           Permanently remove a server
+mc install [--type TYPE] [--version VER]   Install the server jar
+mc install <pack.mrpack>                   Install from a Modrinth modpack
+mc upgrade [--version VER]                 Upgrade to a newer version
+mc upgrade <new.mrpack>                    Upgrade from a new Modrinth modpack
+mc start                                   Start the server
+mc stop                                    Stop the server gracefully
+mc restart                                 Restart the server
+mc status                                  Show systemd service status
+mc backup                                  Create a timestamped backup
+mc restore <file>                          Restore from a backup archive
+mc logs                                    Follow the server log
+mc delete                                  Permanently remove the server
 ```
 
-Servers run as the `minecraft` system user under `systemd`. Data lives in `/opt/minecraft/<name>`,
-backups in `/var/backups/minecraft/<name>`, and per-server config in `/etc/minecraft/<name>.conf`.
+Server types: `vanilla` (default), `paper`, `fabric`, `neoforge`.
+
+The server runs as the `minecraft` system user under `systemd`. Data lives in `/opt/minecraft`,
+backups in `/var/backups/minecraft`, and configuration in `/etc/minecraft/server.conf`.
+RCON is **disabled by default**; install `mc-rcon` to enable it automatically.
 
 ---
 
@@ -59,12 +64,13 @@ sudo apt install mc-rcon
 ```
 
 ```
-mc rcon <name>             Open an interactive RCON session
-mc rcon <name> <command>   Run a single command and print the response
+mc rcon                    Open an interactive RCON session
+mc rcon <command>          Run a single command and print the response
 ```
 
-RCON is enabled automatically during `mc install`. The password is stored in
-`/etc/minecraft/<name>.passwd` (readable only by root and the `minecraft` user).
+Installing `mc-rcon` automatically enables RCON on the managed server and generates
+a random password stored in `/etc/minecraft/server.passwd` (readable only by root
+and the `minecraft` user).
 
 ---
 

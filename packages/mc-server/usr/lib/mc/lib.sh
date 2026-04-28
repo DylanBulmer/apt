@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Shared library sourced by /usr/bin/mc
+# Core library sourced by /usr/bin/mc
 
-MC_BASE="${MC_BASE:-/opt/minecraft}"
-MC_BACKUP="${MC_BACKUP:-/var/backups/minecraft}"
-MC_CONFIG="${MC_CONFIG:-/etc/minecraft}"
+MC_BASE="/opt/minecraft"
+MC_BACKUP="/var/backups/minecraft"
+MC_CONFIG="/etc/minecraft"
+SERVER_CONF="$MC_CONFIG/server.conf"
+PASSWD_FILE="$MC_CONFIG/server.passwd"
+MRPACK_MANIFEST="$MC_CONFIG/server.mrpack.json"
+LOCK_FILE="/run/minecraft/mc.lock"
 MC_USER="minecraft"
 
 # ── Output helpers ─────────────────────────────────────────────────────────────
@@ -19,67 +23,52 @@ require_root() {
     [[ $EUID -eq 0 ]] || die "This command must be run as root."
 }
 
-require_name() {
-    local name="${1:-}"
-    [[ -n "$name" ]] || die "Server name required."
-}
-
 require_server() {
-    local name="$1"
-    [[ -d "$MC_BASE/$name" ]] || die "Server '$name' not found. Run: mc install $name"
+    [[ -f "$MC_BASE/server.jar" || -f "$MC_BASE/run.sh" ]] \
+        || die "No server installed. Run: mc install"
 }
 
 # ── Java version helpers ───────────────────────────────────────────────────────
 
-#
-# Minecraft version → minimum Java major version mapping:
-#
-#   < 1.17        Java 8   (pre-modern; Forge 1.12.2, etc.)
-#   1.17.x        Java 17  (Mojang requires 16; 16 is EOL so we use LTS 17)
-#   1.18 – 1.20.4 Java 17
-#   1.20.5+       Java 21  (Mojang hard requirement)
-#   1.21+         Java 21
-#
 mc_required_java() {
     local mc_ver="$1"
-    local minor patch
-    IFS='.' read -r _ minor patch <<< "$mc_ver"
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$mc_ver"
+    major="${major:-0}"
     minor="${minor:-0}"
     patch="${patch:-0}"
 
-    if   [[ "$minor" -ge 21 ]];                          then echo 21
-    elif [[ "$minor" -eq 20 && "$patch" -ge 5 ]];        then echo 21
-    elif [[ "$minor" -ge 17 ]];                          then echo 17
-    else echo 8
+    # Mojang switched to a new versioning scheme after 1.21.x.
+    # Versions 26.x.x and above use the new format and require Java 25.
+    if   [[ "$major" -ge 26 ]];                                then echo 25
+    # Past 1.x.x versioning
+    elif [[ "$minor" -ge 21 ]] \
+      || [[ "$minor" -eq 20 && "$patch" -ge 5 ]];              then echo 21
+    elif [[ "$minor" -ge 18 ]];                                then echo 17
+    else                                                            echo 8
     fi
 }
 
-# Return the major version of a given java binary (or the system 'java').
 java_major_version() {
     local bin="${1:-java}"
     local raw
     raw=$("$bin" -version 2>&1 | awk -F '"' '/version/ { print $2 }')
     if [[ "$raw" == 1.* ]]; then
-        echo "${raw#1.}" | cut -d. -f1   # 1.8.0_xxx → 8
+        echo "${raw#1.}" | cut -d. -f1
     else
-        echo "${raw%%.*}"                 # 21.0.3 → 21
+        echo "${raw%%.*}"
     fi
 }
 
-# Find the java binary for a given major version.
-# Prints the path to stdout and returns 0 on success, 1 if not found.
 find_java_binary() {
     local required="$1"
     local bin
 
-    # Walk update-alternatives registry — matches any provider (OpenJDK, Temurin, Corretto …)
     while IFS= read -r bin; do
         [[ -x "$bin" ]] || continue
-        # Path typically contains -<version><non-digit> e.g. java-21-openjdk or temurin-21-amd64
         [[ "$bin" =~ -${required}([^0-9]|$) ]] && { echo "$bin"; return 0; }
     done < <(update-alternatives --list java 2>/dev/null)
 
-    # Direct filesystem search for known JVM install conventions
     local candidate
     for candidate in \
         "/usr/lib/jvm/java-${required}-openjdk-amd64/bin/java" \
@@ -98,8 +87,7 @@ find_java_binary() {
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 load_config() {
-    local name="$1"
-    SERVER_TYPE="${DEFAULT_SERVER_TYPE:-paper}"
+    SERVER_TYPE="${DEFAULT_SERVER_TYPE:-vanilla}"
     MINECRAFT_VERSION="latest"
     JAVA_VERSION=""
     SERVER_RAM="2G"
@@ -107,52 +95,134 @@ load_config() {
     JAVA_OPTS=""
     SERVER_PORT="25565"
     BACKUP_KEEP="7"
+    BACKUP_SCHEDULE="weekly"
 
-    [[ -f "$MC_CONFIG/defaults.conf"   ]] && source "$MC_CONFIG/defaults.conf"
-    [[ -f "$MC_CONFIG/${name}.conf"    ]] && source "$MC_CONFIG/${name}.conf"
+    [[ -f "$MC_CONFIG/defaults.conf" ]] && source "$MC_CONFIG/defaults.conf"
+    [[ -f "$SERVER_CONF"             ]] && source "$SERVER_CONF"
 }
 
 write_config() {
-    local name="$1"
-    cat > "$MC_CONFIG/${name}.conf" <<EOF
-# mc configuration — ${name}
+    mkdir -p "$MC_CONFIG"
+    cat > "$SERVER_CONF" <<EOF
+# mc server configuration
 SERVER_TYPE=${SERVER_TYPE}
 MINECRAFT_VERSION=${MINECRAFT_VERSION}
 JAVA_VERSION=${JAVA_VERSION}
 SERVER_RAM=${SERVER_RAM}
 SERVER_PORT=${SERVER_PORT}
 BACKUP_KEEP=${BACKUP_KEEP}
+BACKUP_SCHEDULE=${BACKUP_SCHEDULE}
 JAVA_OPTS="${JAVA_OPTS}"
 EOF
+
+    # Regenerate backup timer drop-in so daemon-reload picks up schedule changes
+    local dropin_dir="/etc/systemd/system/minecraft-backup.timer.d"
+    if [[ -d /etc/systemd/system ]]; then
+        mkdir -p "$dropin_dir"
+        cat > "${dropin_dir}/schedule.conf" <<EOF
+[Timer]
+OnCalendar=
+OnCalendar=${BACKUP_SCHEDULE}
+EOF
+    fi
+}
+
+# ── Process lock ───────────────────────────────────────────────────────────────
+
+acquire_lock() {
+    mkdir -p "$(dirname "$LOCK_FILE")"
+
+    if [[ -f "$LOCK_FILE" ]]; then
+        local held_pid held_cmd
+        held_pid=$(sed -n '1p' "$LOCK_FILE" 2>/dev/null)
+        held_cmd=$(sed -n '2p' "$LOCK_FILE" 2>/dev/null)
+        if [[ -n "$held_pid" ]] && kill -0 "$held_pid" 2>/dev/null; then
+            die "Another mc operation is already running: PID $held_pid ($held_cmd). Try again later."
+        else
+            warn "Removing stale lock from PID ${held_pid:-?} (${held_cmd:-unknown})"
+        fi
+    fi
+
+    printf '%s\n%s\n' "$$" "${_MC_CMD:-unknown}" > "$LOCK_FILE"
+    trap 'rm -f "$LOCK_FILE"' EXIT
 }
 
 # ── Systemd helpers ────────────────────────────────────────────────────────────
 
 is_running() {
-    systemctl is-active --quiet "minecraft@${1}" 2>/dev/null
+    systemctl is-active --quiet minecraft 2>/dev/null
 }
 
 # ── RCON helpers ───────────────────────────────────────────────────────────────
 
+rcon_available() {
+    [[ -f "$PASSWD_FILE" ]] && command -v mcrcon >/dev/null 2>&1
+}
+
 generate_rcon_password() {
-    # 24 random bytes → URL-safe base64 (no padding); 32-char output
     head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
 }
 
-# Send a single command via RCON and print the response.
-# Silently returns 1 if RCON is not configured, mcrcon is not installed,
-# or the server is unreachable.
+# Send a single RCON command. Returns 1 if RCON is not configured or unavailable.
 rcon_command() {
-    local name="$1"
-    shift
-    local passwd_file="$MC_CONFIG/${name}.passwd"
-    [[ -f "$passwd_file" ]] || return 1
-    command -v mcrcon >/dev/null 2>&1 || return 1
-    load_config "$name"
+    rcon_available || return 1
+    load_config
     local port=$((SERVER_PORT + 10))
     local password
-    password=$(cat "$passwd_file")
-    mcrcon 127.0.0.1 "$port" "$password" "$@"
+    password=$(cat "$PASSWD_FILE")
+    mcrcon 127.0.0.1 "$port" "$password" "$@" 2>/dev/null
+}
+
+# ── server.properties helpers ──────────────────────────────────────────────────
+
+# Set or replace a key=value in server.properties. Creates the file if absent.
+sprop_set() {
+    local key="$1" value="$2"
+    local file="$MC_BASE/server.properties"
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    else
+        echo "${key}=${value}" >> "$file"
+    fi
+}
+
+sprop_get() {
+    local key="$1"
+    grep "^${key}=" "$MC_BASE/server.properties" 2>/dev/null | cut -d= -f2-
+}
+
+# Merge an override server.properties into the live one, protecting system-managed keys.
+merge_server_properties() {
+    local override="$1"
+    local dest="$MC_BASE/server.properties"
+    [[ -f "$override" ]] || return 0
+
+    # Keys the system owns — never overwritten by pack overrides
+    local -a protected=(server-port enable-rcon rcon.port rcon.password)
+    declare -A saved
+    for key in "${protected[@]}"; do
+        saved["$key"]=$(sprop_get "$key")
+    done
+
+    cp "$override" "$dest"
+
+    for key in "${protected[@]}"; do
+        local val="${saved[$key]}"
+        [[ -n "$val" ]] && sprop_set "$key" "$val"
+    done
+}
+
+# Write the initial server.properties (RCON off by default).
+init_server_properties() {
+    load_config
+    local rcon_port=$((SERVER_PORT + 10))
+    cat > "$MC_BASE/server.properties" <<EOF
+server-port=${SERVER_PORT}
+enable-rcon=false
+rcon.port=${rcon_port}
+rcon.password=
+EOF
+    echo "eula=true" > "$MC_BASE/eula.txt"
 }
 
 # ── Download helpers ───────────────────────────────────────────────────────────
@@ -170,14 +240,22 @@ download_paper() {
     build_info=$(curl -sf "${api}/versions/${version}/builds") \
         || die "Failed to fetch Paper builds for $version."
 
-    local build filename
-    build=$(echo "$build_info" | jq -r '.builds[-1].build')
+    local build filename checksum
+    build=$(echo "$build_info"    | jq -r '.builds[-1].build')
     filename=$(echo "$build_info" | jq -r '.builds[-1].downloads.application.name')
+    checksum=$(echo "$build_info" | jq -r '.builds[-1].downloads.application.sha256')
 
     info "Downloading Paper $version build $build..."
     curl -sf -o "$dest" \
         "${api}/versions/${version}/builds/${build}/downloads/${filename}" \
         || die "Failed to download Paper jar."
+
+    if [[ -n "$checksum" ]]; then
+        local actual
+        actual=$(sha256sum "$dest" | cut -d' ' -f1)
+        [[ "$actual" == "$checksum" ]] \
+            || die "Hash mismatch for Paper jar (expected $checksum, got $actual)"
+    fi
 
     RESOLVED_VERSION="$version"
 }
@@ -193,17 +271,26 @@ download_vanilla() {
         version=$(echo "$manifest" | jq -r '.latest.release')
     fi
 
-    local version_url jar_url
+    local version_url
     version_url=$(echo "$manifest" | jq -r --arg v "$version" \
-        '.versions[] | select(.id==$v) | .url') \
-        || die "Version $version not found in manifest."
-    [[ -n "$version_url" ]] || die "Minecraft version '$version' not found."
+        '.versions[] | select(.id==$v) | .url')
+    [[ -n "$version_url" ]] || die "Minecraft version '$version' not found in manifest."
 
-    jar_url=$(curl -sf "$version_url" | jq -r '.downloads.server.url') \
-        || die "Failed to fetch server jar URL for $version."
+    local ver_meta jar_url checksum
+    ver_meta=$(curl -sf "$version_url") || die "Failed to fetch version metadata for $version."
+    jar_url=$(echo  "$ver_meta" | jq -r '.downloads.server.url')
+    checksum=$(echo "$ver_meta" | jq -r '.downloads.server.sha1')
 
     info "Downloading Vanilla $version..."
     curl -sf -o "$dest" "$jar_url" || die "Failed to download Vanilla jar."
+
+    if [[ -n "$checksum" ]]; then
+        local actual
+        actual=$(sha1sum "$dest" | cut -d' ' -f1)
+        [[ "$actual" == "$checksum" ]] \
+            || die "Hash mismatch for Vanilla jar (expected $checksum, got $actual)"
+    fi
+
     RESOLVED_VERSION="$version"
 }
 
@@ -218,9 +305,9 @@ download_fabric() {
 
     local loader_version installer_version
     loader_version=$(curl -sf "${meta}/versions/loader/${version}" \
-        | jq -r '.[0].loader.version') || die "Failed to fetch Fabric loader version."
+        | jq -r '.[0].loader.version')    || die "Failed to fetch Fabric loader version."
     installer_version=$(curl -sf "${meta}/versions/installer" \
-        | jq -r '.[0].version') || die "Failed to fetch Fabric installer version."
+        | jq -r '.[0].version')           || die "Failed to fetch Fabric installer version."
 
     info "Downloading Fabric $version (loader $loader_version)..."
     curl -sf -o "$dest" \
@@ -230,6 +317,50 @@ download_fabric() {
     RESOLVED_VERSION="$version"
 }
 
+# NeoForge uses an installer JAR, not a ready-to-run server.jar.
+# $1 = NeoForge version (or "latest"), $2 = server directory (not a jar path).
+install_neoforge() {
+    local nf_version="$1" server_dir="$2"
+    local base="https://maven.neoforged.net/releases/net/neoforged/neoforge"
+
+    if [[ "$nf_version" == "latest" ]]; then
+        local meta
+        meta=$(curl -sf "${base}/maven-metadata.xml") \
+            || die "Failed to fetch NeoForge metadata."
+        nf_version=$(echo "$meta" \
+            | grep '<latest>' \
+            | sed 's|.*<latest>\(.*\)</latest>.*|\1|')
+        [[ -n "$nf_version" ]] || die "Could not determine latest NeoForge version."
+    fi
+
+    local installer_url="${base}/${nf_version}/neoforge-${nf_version}-installer.jar"
+    local installer_jar
+    installer_jar=$(mktemp --suffix="-neoforge-installer.jar")
+    trap 'rm -f "$installer_jar"' RETURN
+
+    info "Downloading NeoForge ${nf_version} installer..."
+    curl -sf -o "$installer_jar" "$installer_url" \
+        || die "Failed to download NeoForge installer for version ${nf_version}."
+
+    info "Running NeoForge installer (this may take a moment)..."
+    local java_bin="java"
+    if [[ -n "$JAVA_VERSION" ]]; then
+        java_bin=$(find_java_binary "$JAVA_VERSION" 2>/dev/null) || java_bin="java"
+    fi
+
+    "$java_bin" -jar "$installer_jar" --installServer "$server_dir" \
+        || die "NeoForge installer failed."
+
+    [[ -f "${server_dir}/run.sh" ]] \
+        || die "NeoForge installer completed but run.sh was not created."
+
+    chmod +x "${server_dir}/run.sh"
+    # Sentinel so start.sh knows to use run.sh instead of server.jar
+    touch "${server_dir}/.neoforge"
+
+    RESOLVED_VERSION="$nf_version"
+}
+
 download_jar() {
     local type="$1" version="$2" dest="$3"
     RESOLVED_VERSION="$version"
@@ -237,166 +368,398 @@ download_jar() {
         paper)   download_paper   "$version" "$dest" ;;
         vanilla) download_vanilla "$version" "$dest" ;;
         fabric)  download_fabric  "$version" "$dest" ;;
-        *) die "Unknown server type '$type'. Valid: paper, vanilla, fabric." ;;
+        neoforge)
+            # NeoForge installs into the server dir, not a single jar.
+            # Callers must use install_neoforge() directly.
+            die "Use install_neoforge() for neoforge; download_jar() does not support it."
+            ;;
+        *) die "Unknown server type '$type'. Valid: vanilla, paper, fabric, neoforge." ;;
     esac
 }
 
-# ── Commands ───────────────────────────────────────────────────────────────────
+# ── Modrinth allowlist ─────────────────────────────────────────────────────────
+
+MRPACK_URL_ALLOWLIST=(
+    "cdn.modrinth.com"
+    "cdn-raw.modrinth.com"
+)
+
+mrpack_url_allowed() {
+    local url="$1"
+    local host
+    host=$(echo "$url" | sed 's|https://\([^/]*\).*|\1|')
+    for allowed in "${MRPACK_URL_ALLOWLIST[@]}"; do
+        [[ "$host" == "$allowed" ]] && return 0
+    done
+    return 1
+}
+
+# ── Staging helpers ────────────────────────────────────────────────────────────
+
+# Create a staging directory on the same filesystem as MC_BASE.
+make_staging_dir() {
+    mktemp -d "${MC_BASE}.staging.XXXXXX"
+}
+
+# ── mrpack installation ────────────────────────────────────────────────────────
+
+cmd_install_mrpack() {
+    local mrpack_file="$1"
+
+    [[ -f "$mrpack_file" ]] || die "File not found: $mrpack_file"
+    command -v unzip >/dev/null 2>&1 \
+        || die "unzip is required for .mrpack support. Install with: apt install unzip"
+
+    # ── Parse manifest ─────────────────────────────────────────────────────────
+    local manifest
+    manifest=$(unzip -p "$mrpack_file" "modrinth.index.json" 2>/dev/null) \
+        || die "Failed to read modrinth.index.json from $mrpack_file"
+
+    local fmt_version
+    fmt_version=$(echo "$manifest" | jq -r '.formatVersion')
+    [[ "$fmt_version" == "1" ]] \
+        || die "Unsupported .mrpack formatVersion: $fmt_version (only version 1 is supported)"
+
+    # ── Resolve version and server type ───────────────────────────────────────
+    MINECRAFT_VERSION=$(echo "$manifest" | jq -r '.dependencies.minecraft')
+    local nf_version=""
+
+    if echo "$manifest" | jq -e '.dependencies["fabric-loader"]' >/dev/null 2>&1; then
+        SERVER_TYPE="fabric"
+    elif echo "$manifest" | jq -e '.dependencies["neoforge"]' >/dev/null 2>&1; then
+        SERVER_TYPE="neoforge"
+        nf_version=$(echo "$manifest" | jq -r '.dependencies["neoforge"]')
+    elif echo "$manifest" | jq -e '.dependencies["forge"]' >/dev/null 2>&1; then
+        die "Forge server type is not yet supported."
+    elif echo "$manifest" | jq -e '.dependencies["quilt-loader"]' >/dev/null 2>&1; then
+        die "Quilt server type is not yet supported."
+    else
+        SERVER_TYPE="vanilla"
+    fi
+
+    JAVA_VERSION=$(mc_required_java "$MINECRAFT_VERSION")
+
+    info "Pack: $SERVER_TYPE $MINECRAFT_VERSION (Java ${JAVA_VERSION}+)"
+
+    # ── Stage everything ───────────────────────────────────────────────────────
+    local staging
+    staging=$(make_staging_dir)
+    trap 'rm -rf "$staging"' EXIT
+
+    # ── Install server platform ────────────────────────────────────────────────
+    if [[ "$SERVER_TYPE" == "neoforge" ]]; then
+        install_neoforge "${nf_version:-latest}" "$staging"
+    else
+        local tmp_jar="${staging}/server.jar"
+        download_jar "$SERVER_TYPE" "$MINECRAFT_VERSION" "$tmp_jar"
+    fi
+
+    # ── Download mod files from manifest ─────────────────────────────────────
+    local file_count i
+    file_count=$(echo "$manifest" | jq '.files | length')
+    for (( i=0; i<file_count; i++ )); do
+        local path env_server url sha512
+        path=$(      echo "$manifest" | jq -r ".files[$i].path")
+        env_server=$(echo "$manifest" | jq -r ".files[$i].env.server // \"required\"")
+        [[ "$env_server" == "unsupported" ]] && continue
+
+        url=$(echo "$manifest" | jq -r ".files[$i].downloads[0]")
+        if ! mrpack_url_allowed "$url"; then
+            warn "Skipping '$path': download URL not in allowlist ($url)"
+            continue
+        fi
+
+        sha512=$(echo "$manifest" | jq -r ".files[$i].hashes.sha512")
+
+        local dest="${staging}/${path}"
+        mkdir -p "$(dirname "$dest")"
+        info "Downloading: $path"
+        curl -sf -o "$dest" "$url" || die "Failed to download $path"
+
+        local actual_hash
+        actual_hash=$(sha512sum "$dest" | cut -d' ' -f1)
+        if [[ "$actual_hash" != "$sha512" ]]; then
+            rm -f "$dest"
+            die "Hash mismatch for $path\n  expected: $sha512\n  got:      $actual_hash"
+        fi
+    done
+
+    # ── Extract overrides (server-overrides/ takes precedence) ────────────────
+    # Extract overrides/ first, then server-overrides/ on top.
+    if unzip -l "$mrpack_file" 2>/dev/null | grep -q "overrides/"; then
+        unzip -q -o -d "${staging}/_ov" "$mrpack_file" "overrides/*" 2>/dev/null || true
+        if [[ -d "${staging}/_ov/overrides" ]]; then
+            rsync -a "${staging}/_ov/overrides/" "${staging}/"
+            rm -rf "${staging}/_ov"
+        fi
+    fi
+    if unzip -l "$mrpack_file" 2>/dev/null | grep -q "server-overrides/"; then
+        unzip -q -o -d "${staging}/_sov" "$mrpack_file" "server-overrides/*" 2>/dev/null || true
+        if [[ -d "${staging}/_sov/server-overrides" ]]; then
+            rsync -a "${staging}/_sov/server-overrides/" "${staging}/"
+            rm -rf "${staging}/_sov"
+        fi
+    fi
+
+    # ── Commit to server directory (atomic rename) ────────────────────────────
+    mkdir -p "$MC_BASE"
+
+    # Merge server.properties if the pack provided one, protecting system keys.
+    if [[ -f "${staging}/server.properties" ]]; then
+        if [[ -f "$MC_BASE/server.properties" ]]; then
+            merge_server_properties "${staging}/server.properties"
+            rm -f "${staging}/server.properties"
+        fi
+        # If no existing server.properties, init_server_properties will create
+        # one after the rsync below.
+    fi
+
+    rsync -a "${staging}/" "${MC_BASE}/"
+    trap - EXIT
+    rm -rf "$staging"
+
+    # Ensure system-managed properties are correct after the rsync.
+    if [[ ! -f "$MC_BASE/server.properties" ]]; then
+        init_server_properties
+    fi
+
+    # Save manifest for future upgrades.
+    echo "$manifest" > "$MRPACK_MANIFEST"
+
+    write_config
+    chown -R "$MC_USER:$MC_USER" "$MC_BASE"
+
+    info "Installed $SERVER_TYPE $MINECRAFT_VERSION from $(basename "$mrpack_file")"
+    if ! find_java_binary "$JAVA_VERSION" &>/dev/null; then
+        warn "Java ${JAVA_VERSION} not found. Install: apt install openjdk-${JAVA_VERSION}-jre-headless"
+    fi
+}
+
+# ── cmd_install ────────────────────────────────────────────────────────────────
 
 cmd_install() {
-    require_name "${1:-}"
+    # Parse flags
+    local mrpack_file=""
+    load_config  # seed defaults before flag parsing
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --type)    SERVER_TYPE="$2";        shift 2 ;;
+            --version) MINECRAFT_VERSION="$2";  shift 2 ;;
+            *.mrpack)  mrpack_file="$1";        shift   ;;
+            --)        shift; break ;;
+            -*)        die "Unknown option: $1" ;;
+            *)         die "Unexpected argument: $1 (did you mean --type or --version?)" ;;
+        esac
+    done
+
     require_root
-    local name="$1"
+    acquire_lock
 
-    load_config "$name"
-
-    local server_dir="$MC_BASE/$name"
-    mkdir -p "$server_dir"
-
-    local tmp_jar
-    tmp_jar=$(mktemp --suffix=".jar")
-    trap 'rm -f "$tmp_jar"' EXIT
-
-    download_jar "$SERVER_TYPE" "$MINECRAFT_VERSION" "$tmp_jar"
-
-    mv "$tmp_jar" "$server_dir/server.jar"
-    trap - EXIT
-    chown "$MC_USER:$MC_USER" "$server_dir/server.jar"
-
-    # Derive the required Java version from the resolved MC version
-    MINECRAFT_VERSION="$RESOLVED_VERSION"
-    JAVA_VERSION=$(mc_required_java "$RESOLVED_VERSION")
-    write_config "$name"
-
-    # Generate RCON password if not already present
-    local passwd_file="$MC_CONFIG/${name}.passwd"
-    if [[ ! -f "$passwd_file" ]]; then
-        generate_rcon_password > "$passwd_file"
-        chmod 640 "$passwd_file"
-        chown root:"$MC_USER" "$passwd_file"
-        info "RCON password saved to $passwd_file"
+    if [[ -n "$mrpack_file" ]]; then
+        cmd_install_mrpack "$mrpack_file"
+        return
     fi
 
-    # Pre-seed server.properties; the server expands missing keys on first run
-    if [[ ! -f "$server_dir/server.properties" ]]; then
-        local rcon_pass rcon_port_num
-        rcon_pass=$(cat "$passwd_file")
-        rcon_port_num=$((SERVER_PORT + 10))
-        cat > "$server_dir/server.properties" <<EOF
-server-port=${SERVER_PORT}
-enable-rcon=true
-rcon.port=${rcon_port_num}
-rcon.password=${rcon_pass}
-EOF
-        echo "eula=true" > "$server_dir/eula.txt"
+    mkdir -p "$MC_BASE"
+
+    local staging
+    staging=$(make_staging_dir)
+    trap 'rm -rf "$staging"' EXIT
+
+    if [[ "$SERVER_TYPE" == "neoforge" ]]; then
+        install_neoforge "$MINECRAFT_VERSION" "$staging"
+        MINECRAFT_VERSION="$RESOLVED_VERSION"
+    else
+        local tmp_jar="${staging}/server.jar"
+        download_jar "$SERVER_TYPE" "$MINECRAFT_VERSION" "$tmp_jar"
+        MINECRAFT_VERSION="$RESOLVED_VERSION"
+        mv "$tmp_jar" "$MC_BASE/server.jar"
+        trap - EXIT
+        rm -rf "$staging"
+        staging=""
     fi
 
-    chown -R "$MC_USER:$MC_USER" "$server_dir"
+    if [[ -n "$staging" ]]; then
+        rsync -a "${staging}/" "${MC_BASE}/"
+        trap - EXIT
+        rm -rf "$staging"
+    fi
+
+    JAVA_VERSION=$(mc_required_java "$MINECRAFT_VERSION")
+    chown -R "$MC_USER:$MC_USER" "$MC_BASE"
+    write_config
+
+    if [[ ! -f "$MC_BASE/server.properties" ]]; then
+        init_server_properties
+    fi
+
     systemctl daemon-reload 2>/dev/null || true
 
-    info "Installed $SERVER_TYPE $RESOLVED_VERSION to $server_dir/server.jar"
-    info "Requires Java ${JAVA_VERSION}."
-
+    info "Installed $SERVER_TYPE $MINECRAFT_VERSION"
     if ! find_java_binary "$JAVA_VERSION" &>/dev/null; then
-        warn "Java ${JAVA_VERSION} not found on this system."
-        warn "Install it with: apt install openjdk-${JAVA_VERSION}-jre-headless"
+        warn "Java ${JAVA_VERSION} not found. Install: apt install openjdk-${JAVA_VERSION}-jre-headless"
     fi
-
-    info "Enable and start with: systemctl enable --now minecraft@${name}"
+    info "Enable and start with: systemctl enable --now minecraft"
 }
 
-cmd_update() {
-    require_name "${1:-}"
-    require_root
-    local name="$1"
-    require_server "$name"
+# ── cmd_upgrade ────────────────────────────────────────────────────────────────
 
-    local was_running=false
-    if is_running "$name"; then
-        was_running=true
-        warn "Stopping '$name' for update..."
-        systemctl stop "minecraft@${name}"
+cmd_upgrade() {
+    local mrpack_file="" new_version=""
+    load_config
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --version) new_version="$2"; shift 2 ;;
+            *.mrpack)  mrpack_file="$1"; shift   ;;
+            --)        shift; break ;;
+            -*)        die "Unknown option: $1" ;;
+            *)         die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    require_root
+    require_server
+    acquire_lock
+
+    # mrpack-based servers require a new mrpack.
+    if [[ -f "$MRPACK_MANIFEST" && -z "$mrpack_file" ]]; then
+        die "This server was installed from a .mrpack file. Provide a new .mrpack to upgrade: mc upgrade <new.mrpack>"
     fi
 
-    cmd_install "$name"
-    chown -R "$MC_USER:$MC_USER" "$MC_BASE/$name"
+    # Backup before any changes.
+    info "Creating pre-upgrade backup..."
+    cmd_backup || die "Pre-upgrade backup failed. Aborting upgrade."
+
+    local was_running=false
+    if is_running; then
+        was_running=true
+        info "Stopping server for upgrade..."
+        systemctl stop minecraft
+    fi
+
+    if [[ -n "$mrpack_file" ]]; then
+        cmd_install_mrpack "$mrpack_file"
+    else
+        [[ -n "$new_version" ]] && MINECRAFT_VERSION="$new_version"
+
+        local staging
+        staging=$(make_staging_dir)
+        trap 'rm -rf "$staging"' EXIT
+
+        if [[ "$SERVER_TYPE" == "neoforge" ]]; then
+            install_neoforge "$MINECRAFT_VERSION" "$staging"
+            MINECRAFT_VERSION="$RESOLVED_VERSION"
+            rsync -a "${staging}/" "${MC_BASE}/"
+            trap - EXIT
+            rm -rf "$staging"
+        else
+            local tmp_jar="${staging}/server.jar"
+            download_jar "$SERVER_TYPE" "$MINECRAFT_VERSION" "$tmp_jar"
+            MINECRAFT_VERSION="$RESOLVED_VERSION"
+            mv "$tmp_jar" "$MC_BASE/server.jar"
+            trap - EXIT
+            rm -rf "$staging"
+        fi
+
+        JAVA_VERSION=$(mc_required_java "$MINECRAFT_VERSION")
+        write_config
+        chown -R "$MC_USER:$MC_USER" "$MC_BASE"
+    fi
 
     if $was_running; then
-        info "Restarting '$name'..."
-        systemctl start "minecraft@${name}"
+        info "Restarting server..."
+        systemctl start minecraft
     fi
+
+    info "Upgrade complete."
 }
+
+# ── cmd_start ──────────────────────────────────────────────────────────────────
 
 cmd_start() {
-    require_name "${1:-}"
     require_root
-    local name="$1"
-    require_server "$name"
-    is_running "$name" && die "Server '$name' is already running."
-    systemctl start "minecraft@${name}"
-    info "Started $name."
+    require_server
+    is_running && die "Server is already running."
+    systemctl start minecraft
+    # Wait up to 60 s for the unit to reach active state.
+    local i
+    for (( i=0; i<12; i++ )); do
+        sleep 5
+        is_running && { info "Server started."; return 0; }
+    done
+    error "Server did not reach active state within 60 s."
+    error "Check logs with: mc logs"
+    return 1
 }
+
+# ── cmd_stop ───────────────────────────────────────────────────────────────────
 
 cmd_stop() {
-    require_name "${1:-}"
     require_root
-    local name="$1"
-    require_server "$name"
-    is_running "$name" || die "Server '$name' is not running."
-    systemctl stop "minecraft@${name}"
-    info "Stopped $name."
+    is_running || die "Server is not running."
+    # Graceful warnings are handled by ExecStop=/usr/lib/mc/stop.sh in the unit.
+    systemctl stop minecraft
+    info "Server stopped."
 }
+
+# ── cmd_restart ────────────────────────────────────────────────────────────────
 
 cmd_restart() {
-    require_name "${1:-}"
     require_root
-    local name="$1"
-    require_server "$name"
-    systemctl restart "minecraft@${name}"
-    info "Restarted $name."
+    require_server
+    # Stop triggers ExecStop (warnings). Start brings it back up.
+    is_running && systemctl stop minecraft
+    systemctl start minecraft
+    info "Server restarted."
 }
+
+# ── cmd_status ─────────────────────────────────────────────────────────────────
 
 cmd_status() {
-    require_name "${1:-}"
-    local name="$1"
-    require_server "$name"
-    systemctl status "minecraft@${name}" --no-pager
+    systemctl status minecraft --no-pager
 }
 
-cmd_backup() {
-    require_name "${1:-}"
-    require_root
-    local name="$1"
-    require_server "$name"
-    load_config "$name"
+# ── cmd_backup ─────────────────────────────────────────────────────────────────
 
-    local server_dir="$MC_BASE/$name"
-    local backup_dir="$MC_BACKUP/$name"
+cmd_backup() {
+    require_root
+    require_server
+    load_config
+
     local timestamp backup_file
     timestamp=$(date +%Y%m%d-%H%M%S)
-    backup_file="${backup_dir}/${name}-${timestamp}.tar.gz"
-
-    mkdir -p "$backup_dir"
+    backup_file="${MC_BACKUP}/minecraft-${timestamp}.tar.gz"
+    mkdir -p "$MC_BACKUP"
 
     local was_running=false
-    if is_running "$name"; then
+    if is_running; then
         was_running=true
-        rcon_command "$name" "say [mc] Backup starting — brief lag possible" 2>/dev/null || true
-        rcon_command "$name" "save-off" 2>/dev/null || true
-        rcon_command "$name" "save-all" 2>/dev/null || true
+        rcon_command "say [mc] Backup starting — brief lag possible" 2>/dev/null || true
+        rcon_command "save-off"  2>/dev/null || true
+        rcon_command "save-all"  2>/dev/null || true
         sleep 3
     fi
 
+    # Ensure save-on is restored even if the script is interrupted.
+    local save_on_needed=$was_running
+    trap '[[ "$save_on_needed" == "true" ]] && rcon_command "save-on" 2>/dev/null || true' EXIT
+
     info "Creating backup: $backup_file"
-    tar -czf "$backup_file" -C "$MC_BASE" "$name"
+    tar -czf "$backup_file" -C "$(dirname "$MC_BASE")" "$(basename "$MC_BASE")" \
+        || die "tar failed; backup not created."
+
+    save_on_needed=false  # backup succeeded; clear the trap duty
+    trap - EXIT
 
     if $was_running; then
-        rcon_command "$name" "save-on" 2>/dev/null || true
-        rcon_command "$name" "say [mc] Backup complete" 2>/dev/null || true
+        rcon_command "save-on"  2>/dev/null || true
+        rcon_command "say [mc] Backup complete" 2>/dev/null || true
     fi
 
     if [[ "${BACKUP_KEEP:-7}" -gt 0 ]]; then
-        ls -1t "${backup_dir}/${name}-"*.tar.gz 2>/dev/null \
+        ls -1t "${MC_BACKUP}/minecraft-"*.tar.gz 2>/dev/null \
             | tail -n +"$((BACKUP_KEEP + 1))" \
             | xargs -r rm --
     fi
@@ -405,81 +768,90 @@ cmd_backup() {
     info "Backup complete: $backup_file"
 }
 
-cmd_restore() {
-    require_name "${1:-}"
-    require_root
-    local name="$1"
-    local archive="${2:-}"
-    [[ -n "$archive" ]] || die "Usage: mc restore <name> <backup-file>"
-    [[ -f "$archive"  ]] || die "Backup file not found: $archive"
-    require_server "$name"
+# ── cmd_restore ────────────────────────────────────────────────────────────────
 
-    if is_running "$name"; then
-        warn "Stopping '$name' for restore..."
-        systemctl stop "minecraft@${name}"
+cmd_restore() {
+    local archive="${1:-}"
+    require_root
+    [[ -n "$archive" ]] || die "Usage: mc restore <backup-file>"
+    [[ -f "$archive"  ]] || die "Backup file not found: $archive"
+    acquire_lock
+
+    if is_running; then
+        warn "Stopping server for restore..."
+        systemctl stop minecraft
     fi
 
-    info "Restoring '$name' from $archive..."
-    local server_dir="$MC_BASE/$name"
-    rm -rf "${server_dir:?}"/*
-    tar -xzf "$archive" -C "$MC_BASE"
-    chown -R "$MC_USER:$MC_USER" "$server_dir"
-    info "Restore complete. Start with: mc start $name"
+    info "Restoring from $archive..."
+    rm -rf "${MC_BASE:?}"/*
+    tar -xzf "$archive" -C "$(dirname "$MC_BASE")"
+    chown -R "$MC_USER:$MC_USER" "$MC_BASE"
+    info "Restore complete. Start with: mc start"
 }
+
+# ── cmd_logs ───────────────────────────────────────────────────────────────────
 
 cmd_logs() {
-    require_name "${1:-}"
-    local name="$1"
-    require_server "$name"
-    exec journalctl -u "minecraft@${name}" -f --no-pager
+    exec journalctl -u minecraft -f --no-pager
 }
+
+# ── cmd_delete ─────────────────────────────────────────────────────────────────
 
 cmd_delete() {
-    require_name "${1:-}"
     require_root
-    local name="$1"
-    require_server "$name"
+    acquire_lock
 
-    echo -e "${RED}WARNING: This will permanently delete server '$name' and all its data.${NC}"
-    read -rp "Type the server name to confirm: " confirm
-    [[ "$confirm" == "$name" ]] || die "Confirmation did not match. Aborting."
+    echo -e "${RED}WARNING: This will permanently delete the server and all its data.${NC}"
+    read -rp "Type 'delete' to confirm: " confirm
+    [[ "$confirm" == "delete" ]] || die "Confirmation did not match. Aborting."
 
-    if is_running "$name"; then
-        systemctl stop "minecraft@${name}"
+    if is_running; then
+        systemctl stop minecraft
     fi
-    systemctl disable "minecraft@${name}" 2>/dev/null || true
+    systemctl disable minecraft 2>/dev/null || true
 
-    rm -rf "${MC_BASE:?}/${name}"
-    rm -f  "$MC_CONFIG/${name}.conf"
-    rm -f  "$MC_CONFIG/${name}.passwd"
+    rm -rf "${MC_BASE:?}"
+    rm -f  "$SERVER_CONF"
+    rm -f  "$PASSWD_FILE"
+    rm -f  "$MRPACK_MANIFEST"
 
-    info "Server '$name' deleted."
-    info "Backups in $MC_BACKUP/$name were preserved."
+    info "Server deleted."
+    info "Backups in $MC_BACKUP were preserved."
 }
+
+# ── usage ──────────────────────────────────────────────────────────────────────
 
 usage() {
     cat <<'EOF'
 mc — Minecraft server lifecycle manager
 
-Usage: mc <command> [arguments]
+Usage: mc <command> [options]
 
 Server management:
-  install <name>             Download/install the server jar and configure
-  update <name>              Update server jar to the latest build
-  delete <name>              Permanently remove a server
+  install [--type TYPE] [--version VER]   Install the server jar
+  install <pack.mrpack>                   Install from a Modrinth modpack
+  upgrade [--version VER]                 Upgrade the server jar
+  upgrade <new.mrpack>                    Upgrade from a new Modrinth modpack
+  delete                                  Permanently remove the server
 
 Lifecycle:
-  start <name>               Start the server
-  stop <name>                Stop the server gracefully
-  restart <name>             Restart the server
-  status <name>              Show systemd service status
+  start                                   Start the server
+  stop                                    Stop the server (graceful if RCON available)
+  restart                                 Restart the server
+  status                                  Show systemd service status
 
 Data management:
-  backup <name>              Create a timestamped backup
-  restore <name> <file>      Restore from a backup archive
+  backup                                  Create a timestamped backup
+  restore <file>                          Restore from a backup archive
 
 Monitoring:
-  logs <name>                Follow the server log (journalctl)
+  logs                                    Follow the server log (journalctl)
 
+Console (requires mc-rcon):
+  rcon                                    Open an interactive RCON session
+  rcon <command>                          Run a single command and print the response
+  Install with: apt install mc-rcon
+
+Server types: vanilla (default), paper, fabric, neoforge
 EOF
 }

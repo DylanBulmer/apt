@@ -1,0 +1,26 @@
+#!/bin/bash
+# When mc-rcon is removed, disable RCON in server.properties.
+set -e
+
+SERVER_DIR="/opt/minecraft"
+MC_USER="minecraft"
+
+case "$1" in
+    remove|purge)
+        PROPS="$SERVER_DIR/server.properties"
+        if [[ -f "$PROPS" ]]; then
+            sed -i "s|^enable-rcon=.*|enable-rcon=false|" "$PROPS"
+            sed -i "s|^rcon.password=.*|rcon.password=|" "$PROPS"
+            chown "$MC_USER:$MC_USER" "$PROPS"
+        fi
+
+        # Restart server if running so the change takes effect
+        if command -v systemctl &>/dev/null \
+                && systemctl is-active --quiet minecraft 2>/dev/null; then
+            echo "mc-rcon: restarting minecraft service to disable RCON..."
+            systemctl restart minecraft || true
+        fi
+        ;;
+esac
+
+exit 0

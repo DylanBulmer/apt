@@ -4,10 +4,11 @@ set -e
 case "$1" in
     remove|purge)
         if command -v systemctl &>/dev/null; then
-            for svc in $(systemctl list-units 'minecraft@*.service' --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
-                systemctl stop "$svc" 2>/dev/null || true
-                systemctl disable "$svc" 2>/dev/null || true
-            done
+            systemctl stop    minecraft              2>/dev/null || true
+            systemctl disable minecraft              2>/dev/null || true
+            systemctl stop    minecraft-backup.timer 2>/dev/null || true
+            systemctl disable minecraft-backup.timer 2>/dev/null || true
+            systemctl daemon-reload                  2>/dev/null || true
         fi
         ;;
 esac

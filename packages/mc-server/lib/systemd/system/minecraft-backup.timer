@@ -1,0 +1,14 @@
+[Unit]
+Description=Minecraft Server Backup Timer
+Requires=minecraft-backup.service
+
+[Timer]
+# Default schedule. Override via BACKUP_SCHEDULE in /etc/minecraft/server.conf —
+# mc install/upgrade regenerates the drop-in at
+# /etc/systemd/system/minecraft-backup.timer.d/schedule.conf;
+# run systemctl daemon-reload for changes to take effect.
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,64 @@
+#!/bin/bash
+# When mc-rcon is installed, automatically enable RCON for the managed server.
+# Generates a password if one does not already exist.
+set -e
+
+MC_CONFIG="/etc/minecraft"
+SERVER_CONF="$MC_CONFIG/server.conf"
+PASSWD_FILE="$MC_CONFIG/server.passwd"
+SERVER_DIR="/opt/minecraft"
+MC_USER="minecraft"
+
+case "$1" in
+    configure)
+        # Nothing to do unless mc-server is also installed.
+        [[ -f "$SERVER_CONF" ]] || exit 0
+
+        # Source config to get SERVER_PORT
+        SERVER_PORT="25565"
+        source "$SERVER_CONF" 2>/dev/null || true
+        RCON_PORT=$((SERVER_PORT + 10))
+
+        # Generate password if not present
+        if [[ ! -f "$PASSWD_FILE" ]]; then
+            head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=' > "$PASSWD_FILE"
+            chmod 640 "$PASSWD_FILE"
+            chown root:"$MC_USER" "$PASSWD_FILE"
+        fi
+
+        PASSWORD=$(cat "$PASSWD_FILE")
+
+        # Enable RCON in server.properties
+        PROPS="$SERVER_DIR/server.properties"
+        if [[ -f "$PROPS" ]]; then
+            if grep -q "^enable-rcon=" "$PROPS"; then
+                sed -i "s|^enable-rcon=.*|enable-rcon=true|" "$PROPS"
+            else
+                echo "enable-rcon=true" >> "$PROPS"
+            fi
+
+            if grep -q "^rcon.port=" "$PROPS"; then
+                sed -i "s|^rcon.port=.*|rcon.port=${RCON_PORT}|" "$PROPS"
+            else
+                echo "rcon.port=${RCON_PORT}" >> "$PROPS"
+            fi
+
+            if grep -q "^rcon.password=" "$PROPS"; then
+                sed -i "s|^rcon.password=.*|rcon.password=${PASSWORD}|" "$PROPS"
+            else
+                echo "rcon.password=${PASSWORD}" >> "$PROPS"
+            fi
+
+            chown "$MC_USER:$MC_USER" "$PROPS"
+        fi
+
+        # Restart server if it is running so RCON settings take effect
+        if command -v systemctl &>/dev/null \
+                && systemctl is-active --quiet minecraft 2>/dev/null; then
+            echo "mc-rcon: restarting minecraft service to enable RCON..."
+            systemctl restart minecraft || true
+        fi
+        ;;
+esac
+
+exit 0
