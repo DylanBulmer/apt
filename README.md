@@ -1,6 +1,7 @@
 # apt.bulmer.dev
 
-APT packages by Dylan Bulmer, hosted at [apt.bulmer.dev](https://apt.bulmer.dev).
+APT packages by Dylan Bulmer, hosted at
+[apt.bulmer.dev](https://apt.bulmer.dev).
 
 ## Adding the repository
 
@@ -19,15 +20,15 @@ sudo apt update
 ### `mc-server`
 
 Manages a Minecraft server instance on bare-metal or inside VMs/LXC containers.
-Supports Paper, Vanilla, Fabric, and NeoForge server types with systemd-based lifecycle management,
-automated backups, and multi-version Java support.
+Supports Paper, Vanilla, Fabric, and NeoForge server types with systemd-based
+lifecycle management, automated backups, and multi-version Java support.
 
 ```bash
 sudo apt install mc-server
 ```
 
-Requires Java 17+ (Java 21 recommended for Minecraft 1.20.5+). `mc install` will tell
-you exactly which version to install for your chosen Minecraft version.
+Requires Java 17+ (Java 21 recommended for Minecraft 1.20.5+). `mc install` will
+tell you exactly which version to install for your chosen Minecraft version.
 
 **Commands**
 
@@ -48,16 +49,17 @@ mc delete                                  Permanently remove the server
 
 Server types: `vanilla` (default), `paper`, `fabric`, `neoforge`.
 
-The server runs as the `minecraft` system user under `systemd`. Data lives in `/opt/minecraft`,
-backups in `/var/backups/minecraft`, and configuration in `/etc/minecraft/server.conf`.
-RCON is **disabled by default**; install `mc-rcon` to enable it automatically.
+The server runs as the `minecraft` system user under `systemd`. Data lives in
+`/opt/minecraft`, backups in `/var/backups/minecraft`, and configuration in
+`/etc/minecraft/server.conf`. RCON is **disabled by default**; install `mc-rcon`
+to enable it automatically.
 
 ---
 
 ### `mc-rcon`
 
-Adds the `mc rcon` subcommand, providing interactive RCON console access and single-command
-execution against a running server.
+Adds the `mc rcon` subcommand, providing interactive RCON console access and
+single-command execution against a running server.
 
 ```bash
 sudo apt install mc-rcon
@@ -68,9 +70,16 @@ mc rcon                    Open an interactive RCON session
 mc rcon <command>          Run a single command and print the response
 ```
 
-Installing `mc-rcon` automatically enables RCON on the managed server and generates
-a random password stored in `/etc/minecraft/server.passwd` (readable only by root
-and the `minecraft` user).
+Installing `mc-rcon` automatically enables RCON on the managed server and
+generates a random password stored in `/etc/minecraft/server.passwd` (readable
+only by root and the `minecraft` user).
+
+> [!WARNING]
+> RCON is an **unencrypted protocol** — the password and all commands travel in
+> plaintext. The `rcon` binary enforces loopback-only connections and will
+> refuse any host that does not resolve to `127.0.0.0/8` or `::1`. For
+> additional defence, keep the RCON port off the network: do not bind it to a
+> public interface or publish it through a firewall (default port `25575`).
 
 ---
 
@@ -96,6 +105,7 @@ Requires `reprepro` and the private signing key imported into your GPG keyring.
 
 ### CI/CD
 
-Pushing to `main` (with changes under `packages/`) or pushing a `v*` tag triggers the
-[publish workflow](.github/workflows/publish.yml), which builds packages, signs them,
-and publishes a new Docker image to `ghcr.io/dylanbulmer/apt`.
+Pushing to `main` (with changes under `packages/`) or pushing a `v*` tag
+triggers the [publish workflow](.github/workflows/publish.yml), which builds
+packages, signs them, and publishes a new Docker image to
+`ghcr.io/dylanbulmer/apt`.

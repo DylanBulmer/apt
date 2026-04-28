@@ -13,6 +13,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -170,6 +171,25 @@ static int pkt_recv(int fd, int32_t *out_id, int32_t *out_type, char **out_paylo
 
 /* ── Connection helpers ───────────────────────────────────────────────────── */
 
+/*
+ * Returns 1 if the address in ai is a loopback address, 0 otherwise.
+ * IPv4: anything in 127.0.0.0/8.  IPv6: ::1.
+ */
+static int is_loopback(const struct addrinfo *ai)
+{
+    if (ai->ai_family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *)ai->ai_addr;
+        /* ntohl puts the address in host byte order; the top octet identifies
+         * the /8 block — the entire 127.x.x.x range is reserved for loopback. */
+        return (ntohl(sin->sin_addr.s_addr) >> 24) == 127;
+    }
+    if (ai->ai_family == AF_INET6) {
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)ai->ai_addr;
+        return IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr);
+    }
+    return 0;
+}
+
 static int rcon_connect(const char *host, const char *port)
 {
     /* AF_UNSPEC lets getaddrinfo return both IPv4 and IPv6 candidates. */
@@ -181,6 +201,20 @@ static int rcon_connect(const char *host, const char *port)
     if (gai_err != 0) {
         fprintf(stderr, "rcon: %s: %s\n", host, gai_strerror(gai_err));
         return -1;
+    }
+
+    /* Refuse any host that resolves to a non-loopback address.
+     * RCON is plaintext; connecting outside loopback would expose the
+     * password and all commands on the wire. */
+    for (candidate = res; candidate != NULL; candidate = candidate->ai_next) {
+        if (!is_loopback(candidate)) {
+            fprintf(stderr,
+                    "rcon: refusing non-loopback host '%s' — "
+                    "RCON is unencrypted and must only be used over loopback "
+                    "(127.0.0.1 / ::1)\n", host);
+            freeaddrinfo(res);
+            return -1;
+        }
     }
 
     /* Iterate through all returned addresses and use the first that connects.
