@@ -617,15 +617,21 @@ cmd_install_mrpack() {
     trap - EXIT
     rm -rf "$staging"
 
+    # Save manifest for future upgrades.
+    echo "$manifest" > "$MRPACK_MANIFEST"
+
+    # write_config() must run before init_server_properties(): the latter
+    # calls load_config(), which would otherwise reset SERVER_TYPE/
+    # MINECRAFT_VERSION/JAVA_VERSION to defaults right before they're saved,
+    # silently recording e.g. "vanilla latest" instead of the pack's
+    # resolved "fabric 26.2".
+    write_config
+
     # Ensure system-managed properties are correct after the rsync.
     if [[ ! -f "$MC_BASE/server.properties" ]]; then
         init_server_properties
     fi
 
-    # Save manifest for future upgrades.
-    echo "$manifest" > "$MRPACK_MANIFEST"
-
-    write_config
     chown -R "$MC_USER:$MC_USER" "$MC_BASE"
 
     info "Installed $SERVER_TYPE $MINECRAFT_VERSION from $(basename "$mrpack_file")"

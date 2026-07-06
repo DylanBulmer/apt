@@ -9,6 +9,26 @@ User=minecraft
 Group=minecraft
 WorkingDirectory=/opt/minecraft
 
+# ── Hardening ──────────────────────────────────────────────────────────────
+# The server already runs as the unprivileged 'minecraft' user (above). These
+# directives stop a compromised JVM or mod from regaining privileges or
+# touching anything outside the server's own data directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/minecraft
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# NOTE: MemoryDenyWriteExecute is intentionally omitted — the JVM's JIT needs
+# writable+executable pages and would fail to start under it.
+
 ExecStart=/usr/lib/mc/start.sh
 ExecStop=/usr/lib/mc/stop.sh
 ExecReload=/usr/lib/mc/reload.sh
