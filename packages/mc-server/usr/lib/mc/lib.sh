@@ -84,6 +84,31 @@ find_java_binary() {
     return 1
 }
 
+# Ensure a JRE for the given major version is available, installing it via
+# apt if missing. Interactive callers (a terminal attached, no --yes) are
+# prompted for confirmation; non-interactive callers (Docker entrypoint,
+# --yes) install without asking.
+ensure_java() {
+    # assume_yes is passed down by the caller, not parsed here; ${2:-no} is just a fallback.
+    local required="$1" assume_yes="${2:-no}"
+    find_java_binary "$required" &>/dev/null && return 0
+
+    local pkg="openjdk-${required}-jre-headless"
+
+    if [[ "$assume_yes" != "yes" ]]; then
+        if [[ ! -t 0 ]]; then
+            die "Java ${required} is required but not installed. Re-run with --yes, or install manually: apt install ${pkg}"
+        fi
+        local confirm
+        read -rp "Minecraft requires Java ${required}, which isn't installed. Install ${pkg} now? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || die "Java ${required} is required. Install manually: apt install ${pkg}"
+    fi
+
+    info "Installing ${pkg}..."
+    apt-get update -qq && apt-get install -y --no-install-recommends "$pkg" \
+        || die "Failed to install ${pkg}. Install manually: apt install ${pkg}"
+}
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 load_config() {
@@ -168,9 +193,8 @@ rcon_command() {
     rcon_available || return 1
     load_config
     local port=$((SERVER_PORT + 10))
-    local password
-    password=$(cat "$PASSWD_FILE")
-    rcon 127.0.0.1 "$port" "$password" "$@" 2>/dev/null
+    # Pass the password by file so it never appears in argv or a shell variable.
+    rcon --password-file "$PASSWD_FILE" 127.0.0.1 "$port" "$@" 2>/dev/null
 }
 
 # ── server.properties helpers ──────────────────────────────────────────────────
@@ -227,6 +251,41 @@ EOF
 
 # ── Download helpers ───────────────────────────────────────────────────────────
 
+# Validate a version string (Minecraft, loader, or NeoForge) before it is
+# interpolated into a download URL or filename. Real versions look like
+# "1.21.4", "24w45a", "21.1.66", "21.4.0-beta", or the literal "latest".
+# The charset excludes '/', so a malicious .mrpack cannot smuggle extra URL
+# path segments (e.g. "../../evil") or other unexpected characters into a fetch.
+validate_version() {
+    local ver="$1" label="${2:-version}"
+    [[ "$ver" =~ ^[A-Za-z0-9._+-]+$ ]] \
+        || die "Invalid ${label} '${ver}': only letters, digits, and . _ + - are allowed."
+}
+
+# Verify a downloaded file against an expected hash, deleting it and aborting on
+# mismatch. Fail-closed: an empty/absent/"null" expected hash is treated as a
+# failure, so an artifact is never installed unverified. $2 selects the
+# algorithm (sha1|sha256|sha512).
+verify_sha() {
+    local file="$1" algo="$2" expected="$3"
+    [[ -n "$expected" && "$expected" != "null" ]] \
+        || die "Refusing to install $(basename "$file"): no ${algo} checksum available to verify against."
+
+    local actual
+    case "$algo" in
+        sha1)   actual=$(sha1sum   "$file" | cut -d' ' -f1) ;;
+        sha256) actual=$(sha256sum "$file" | cut -d' ' -f1) ;;
+        sha512) actual=$(sha512sum "$file" | cut -d' ' -f1) ;;
+        *)      die "verify_sha: unknown algorithm '$algo'" ;;
+    esac
+
+    if [[ "${actual,,}" != "${expected,,}" ]]; then
+        rm -f "$file"
+        die "Checksum mismatch for $(basename "$file") (${algo})\n  expected: ${expected}\n  got:      ${actual}"
+    fi
+    info "Verified $(basename "$file") (${algo})"
+}
+
 download_paper() {
     local version="$1" dest="$2"
     local api="https://api.papermc.io/v2/projects/paper"
@@ -246,16 +305,11 @@ download_paper() {
     checksum=$(echo "$build_info" | jq -r '.builds[-1].downloads.application.sha256')
 
     info "Downloading Paper $version build $build..."
-    curl -sf -o "$dest" \
+    curl -sf --proto '=https' -o "$dest" \
         "${api}/versions/${version}/builds/${build}/downloads/${filename}" \
         || die "Failed to download Paper jar."
 
-    if [[ -n "$checksum" ]]; then
-        local actual
-        actual=$(sha256sum "$dest" | cut -d' ' -f1)
-        [[ "$actual" == "$checksum" ]] \
-            || die "Hash mismatch for Paper jar (expected $checksum, got $actual)"
-    fi
+    verify_sha "$dest" sha256 "$checksum"
 
     RESOLVED_VERSION="$version"
 }
@@ -282,14 +336,9 @@ download_vanilla() {
     checksum=$(echo "$ver_meta" | jq -r '.downloads.server.sha1')
 
     info "Downloading Vanilla $version..."
-    curl -sf -o "$dest" "$jar_url" || die "Failed to download Vanilla jar."
+    curl -sf --proto '=https' -o "$dest" "$jar_url" || die "Failed to download Vanilla jar."
 
-    if [[ -n "$checksum" ]]; then
-        local actual
-        actual=$(sha1sum "$dest" | cut -d' ' -f1)
-        [[ "$actual" == "$checksum" ]] \
-            || die "Hash mismatch for Vanilla jar (expected $checksum, got $actual)"
-    fi
+    verify_sha "$dest" sha1 "$checksum"
 
     RESOLVED_VERSION="$version"
 }
@@ -310,7 +359,12 @@ download_fabric() {
         | jq -r '.[0].version')           || die "Failed to fetch Fabric installer version."
 
     info "Downloading Fabric $version (loader $loader_version)..."
-    curl -sf -o "$dest" \
+    # NOTE: Fabric's meta /server/jar endpoint is a dynamically-assembled
+    # launcher and publishes no checksum (no sidecar hash, none in the meta
+    # JSON), so unlike the other server types this download can only be trusted
+    # via TLS. If independent verification is required, switch to the Fabric
+    # installer jar from maven.fabricmc.net (which does ship .sha512 sidecars).
+    curl -sf --proto '=https' -o "$dest" \
         "${meta}/versions/loader/${version}/${loader_version}/${installer_version}/server/jar" \
         || die "Failed to download Fabric server jar."
 
@@ -333,14 +387,26 @@ install_neoforge() {
         [[ -n "$nf_version" ]] || die "Could not determine latest NeoForge version."
     fi
 
+    # Resolved (or manifest-supplied) version is now interpolated into a URL and
+    # a filename — reject anything outside the expected version charset.
+    validate_version "$nf_version" "NeoForge version"
+
     local installer_url="${base}/${nf_version}/neoforge-${nf_version}-installer.jar"
     local installer_jar
     installer_jar=$(mktemp --suffix="-neoforge-installer.jar")
     trap 'rm -f "$installer_jar"' RETURN
 
     info "Downloading NeoForge ${nf_version} installer..."
-    curl -sf -o "$installer_jar" "$installer_url" \
+    curl -sf --proto '=https' -o "$installer_jar" "$installer_url" \
         || die "Failed to download NeoForge installer for version ${nf_version}."
+
+    # This installer jar is executed below, so verify it against the SHA-512
+    # published alongside it in the NeoForge Maven repo before running it.
+    local expected_sha
+    expected_sha=$(curl -sf --proto '=https' "${installer_url}.sha512") \
+        || die "Failed to fetch NeoForge installer checksum (${installer_url}.sha512)."
+    expected_sha=${expected_sha%%[[:space:]]*}   # strip any trailing filename/newline
+    verify_sha "$installer_jar" sha512 "$expected_sha"
 
     info "Running NeoForge installer (this may take a moment)..."
     local java_bin="java"
@@ -363,6 +429,7 @@ install_neoforge() {
 
 download_jar() {
     local type="$1" version="$2" dest="$3"
+    validate_version "$version" "Minecraft version"
     RESOLVED_VERSION="$version"
     case "$type" in
         paper)   download_paper   "$version" "$dest" ;;
@@ -401,10 +468,30 @@ make_staging_dir() {
     mktemp -d "${MC_BASE}.staging.XXXXXX"
 }
 
+# Validate a file path taken from an untrusted .mrpack manifest before using it
+# to build a destination under the staging dir. A malicious pack can set an
+# arbitrary "path" (e.g. "../../../../etc/cron.d/x"); since install runs as root
+# and the staged tree is rsynced into MC_BASE, an unchecked path is an arbitrary
+# root file write. Reject absolute paths, `~`, backslashes, and any `..`
+# component. Returns 0 if the path is safe to use, 1 otherwise.
+mrpack_safe_path() {
+    local path="$1"
+    [[ -n "$path"        ]] || return 1   # empty
+    [[ "$path" != /*     ]] || return 1   # absolute
+    [[ "$path" != '~'*   ]] || return 1   # home expansion / literal ~ root
+    [[ "$path" != *'\'*  ]] || return 1   # backslash (Windows-style separator)
+    # Reject any `..` that forms a whole path component (start, middle, or end).
+    case "/$path/" in
+        */../*) return 1 ;;
+    esac
+    return 0
+}
+
 # ── mrpack installation ────────────────────────────────────────────────────────
 
 cmd_install_mrpack() {
-    local mrpack_file="$1"
+    # assume_yes is passed down by cmd_install/cmd_upgrade, not parsed here.
+    local mrpack_file="$1" assume_yes="${2:-no}"
 
     [[ -f "$mrpack_file" ]] || die "File not found: $mrpack_file"
     command -v unzip >/dev/null 2>&1 \
@@ -463,6 +550,10 @@ cmd_install_mrpack() {
         env_server=$(echo "$manifest" | jq -r ".files[$i].env.server // \"required\"")
         [[ "$env_server" == "unsupported" ]] && continue
 
+        # Reject path traversal before the path is ever used as a destination.
+        mrpack_safe_path "$path" \
+            || die "Refusing unsafe file path in mrpack manifest: '$path'"
+
         url=$(echo "$manifest" | jq -r ".files[$i].downloads[0]")
         if ! mrpack_url_allowed "$url"; then
             warn "Skipping '$path': download URL not in allowlist ($url)"
@@ -472,23 +563,30 @@ cmd_install_mrpack() {
         sha512=$(echo "$manifest" | jq -r ".files[$i].hashes.sha512")
 
         local dest="${staging}/${path}"
+        # Defence in depth: confirm the resolved destination stays inside staging.
+        local resolved
+        resolved=$(realpath -m "$dest")
+        case "$resolved/" in
+            "$staging"/*) : ;;
+            *) die "Refusing path escaping staging dir: '$path'" ;;
+        esac
         mkdir -p "$(dirname "$dest")"
         info "Downloading: $path"
-        curl -sf -o "$dest" "$url" || die "Failed to download $path"
+        curl -sf --proto '=https' -o "$dest" "$url" || die "Failed to download $path"
 
-        local actual_hash
-        actual_hash=$(sha512sum "$dest" | cut -d' ' -f1)
-        if [[ "$actual_hash" != "$sha512" ]]; then
-            rm -f "$dest"
-            die "Hash mismatch for $path\n  expected: $sha512\n  got:      $actual_hash"
-        fi
+        verify_sha "$dest" sha512 "$sha512"
     done
 
     # ── Extract overrides (server-overrides/ takes precedence) ────────────────
     # Extract overrides/ first, then server-overrides/ on top.
+    # Strip any symlinks the pack embedded in its overrides before merging them:
+    # a symlink pointing outside the tree (e.g. -> /etc) would otherwise be copied
+    # into MC_BASE and could later be written through. Legitimate packs ship plain
+    # files, not links.
     if unzip -l "$mrpack_file" 2>/dev/null | grep -q "overrides/"; then
         unzip -q -o -d "${staging}/_ov" "$mrpack_file" "overrides/*" 2>/dev/null || true
         if [[ -d "${staging}/_ov/overrides" ]]; then
+            find "${staging}/_ov/overrides" -type l -delete
             rsync -a "${staging}/_ov/overrides/" "${staging}/"
             rm -rf "${staging}/_ov"
         fi
@@ -496,6 +594,7 @@ cmd_install_mrpack() {
     if unzip -l "$mrpack_file" 2>/dev/null | grep -q "server-overrides/"; then
         unzip -q -o -d "${staging}/_sov" "$mrpack_file" "server-overrides/*" 2>/dev/null || true
         if [[ -d "${staging}/_sov/server-overrides" ]]; then
+            find "${staging}/_sov/server-overrides" -type l -delete
             rsync -a "${staging}/_sov/server-overrides/" "${staging}/"
             rm -rf "${staging}/_sov"
         fi
@@ -530,26 +629,26 @@ cmd_install_mrpack() {
     chown -R "$MC_USER:$MC_USER" "$MC_BASE"
 
     info "Installed $SERVER_TYPE $MINECRAFT_VERSION from $(basename "$mrpack_file")"
-    if ! find_java_binary "$JAVA_VERSION" &>/dev/null; then
-        warn "Java ${JAVA_VERSION} not found. Install: apt install openjdk-${JAVA_VERSION}-jre-headless"
-    fi
+    ensure_java "$JAVA_VERSION" "$assume_yes"
 }
 
 # ── cmd_install ────────────────────────────────────────────────────────────────
 
 cmd_install() {
     # Parse flags
-    local mrpack_file=""
+    # assume_yes is decided here, from --yes/-y below, then passed to callees.
+    local mrpack_file="" assume_yes="no"
     load_config  # seed defaults before flag parsing
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --type)    SERVER_TYPE="$2";        shift 2 ;;
-            --version) MINECRAFT_VERSION="$2";  shift 2 ;;
-            *.mrpack)  mrpack_file="$1";        shift   ;;
-            --)        shift; break ;;
-            -*)        die "Unknown option: $1" ;;
-            *)         die "Unexpected argument: $1 (did you mean --type or --version?)" ;;
+            --type)      SERVER_TYPE="$2";        shift 2 ;;
+            --version)   MINECRAFT_VERSION="$2";  shift 2 ;;
+            --yes|-y)    assume_yes="yes";        shift   ;;
+            *.mrpack)    mrpack_file="$1";        shift   ;;
+            --)          shift; break ;;
+            -*)          die "Unknown option: $1" ;;
+            *)           die "Unexpected argument: $1 (did you mean --type or --version?)" ;;
         esac
     done
 
@@ -557,7 +656,7 @@ cmd_install() {
     acquire_lock
 
     if [[ -n "$mrpack_file" ]]; then
-        cmd_install_mrpack "$mrpack_file"
+        cmd_install_mrpack "$mrpack_file" "$assume_yes"
         return
     fi
 
@@ -597,21 +696,21 @@ cmd_install() {
     systemctl daemon-reload 2>/dev/null || true
 
     info "Installed $SERVER_TYPE $MINECRAFT_VERSION"
-    if ! find_java_binary "$JAVA_VERSION" &>/dev/null; then
-        warn "Java ${JAVA_VERSION} not found. Install: apt install openjdk-${JAVA_VERSION}-jre-headless"
-    fi
+    ensure_java "$JAVA_VERSION" "$assume_yes"
     info "Enable and start with: systemctl enable --now minecraft"
 }
 
 # ── cmd_upgrade ────────────────────────────────────────────────────────────────
 
 cmd_upgrade() {
-    local mrpack_file="" new_version=""
+    # assume_yes is decided here, from --yes/-y below, then passed to callees.
+    local mrpack_file="" new_version="" assume_yes="no"
     load_config
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --version) new_version="$2"; shift 2 ;;
+            --yes|-y)  assume_yes="yes"; shift   ;;
             *.mrpack)  mrpack_file="$1"; shift   ;;
             --)        shift; break ;;
             -*)        die "Unknown option: $1" ;;
@@ -640,7 +739,7 @@ cmd_upgrade() {
     fi
 
     if [[ -n "$mrpack_file" ]]; then
-        cmd_install_mrpack "$mrpack_file"
+        cmd_install_mrpack "$mrpack_file" "$assume_yes"
     else
         [[ -n "$new_version" ]] && MINECRAFT_VERSION="$new_version"
 
@@ -664,6 +763,7 @@ cmd_upgrade() {
         fi
 
         JAVA_VERSION=$(mc_required_java "$MINECRAFT_VERSION")
+        ensure_java "$JAVA_VERSION" "$assume_yes"
         write_config
         chown -R "$MC_USER:$MC_USER" "$MC_BASE"
     fi
@@ -782,9 +882,34 @@ cmd_restore() {
         systemctl stop minecraft
     fi
 
+    # Validate archive members before extracting as root. Reject absolute paths
+    # and any `..` traversal, and require every entry to live under the expected
+    # top-level dir (basename of MC_BASE). A tampered or hand-crafted archive
+    # could otherwise write outside MC_BASE when unpacked into its parent.
+    local listing
+    listing=$(tar -tzf "$archive" 2>/dev/null) \
+        || die "Failed to read archive (not a valid .tar.gz?): $archive"
+
+    local base_name member
+    base_name=$(basename "$MC_BASE")
+    while IFS= read -r member; do
+        [[ -n "$member" ]] || continue
+        case "$member" in
+            /*|*/../*|../*|*/..)
+                die "Refusing archive with unsafe path: '$member'" ;;
+        esac
+        case "$member" in
+            "$base_name"|"$base_name"/|"$base_name"/*) : ;;
+            *) die "Refusing archive with unexpected entry '$member' (expected everything under '${base_name}/')." ;;
+        esac
+    done <<< "$listing"
+
     info "Restoring from $archive..."
-    rm -rf "${MC_BASE:?}"/*
-    tar -xzf "$archive" -C "$(dirname "$MC_BASE")"
+    # Clear existing contents including dotfiles (glob '*' would miss hidden ones).
+    find "${MC_BASE:?}" -mindepth 1 -delete
+    # --no-same-owner: don't honor uid/gid stored in the archive; we chown below.
+    tar --no-same-owner -xzf "$archive" -C "$(dirname "$MC_BASE")" \
+        || die "tar extraction failed; server directory may be incomplete."
     chown -R "$MC_USER:$MC_USER" "$MC_BASE"
     info "Restore complete. Start with: mc start"
 }
@@ -828,11 +953,14 @@ mc — Minecraft server lifecycle manager
 Usage: mc <command> [options]
 
 Server management:
-  install [--type TYPE] [--version VER]   Install the server jar
-  install <pack.mrpack>                   Install from a Modrinth modpack
-  upgrade [--version VER]                 Upgrade the server jar
-  upgrade <new.mrpack>                    Upgrade from a new Modrinth modpack
-  delete                                  Permanently remove the server
+  install [--type TYPE] [--version VER] [--yes]   Install the server jar
+  install <pack.mrpack> [--yes]                   Install from a Modrinth modpack
+  upgrade [--version VER] [--yes]                 Upgrade the server jar
+  upgrade <new.mrpack> [--yes]                     Upgrade from a new Modrinth modpack
+  delete                                          Permanently remove the server
+
+  --yes / -y   Auto-install a missing Java runtime without prompting
+               (required in non-interactive contexts, e.g. Docker).
 
 Lifecycle:
   start                                   Start the server

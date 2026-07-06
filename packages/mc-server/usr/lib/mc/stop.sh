@@ -11,16 +11,13 @@ SERVER_PORT="25565"
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 RCON_PORT=$((SERVER_PORT + 10))
 
+# Pass the password by file so it never appears in argv or a shell variable.
 rcon_say() {
-    local password
-    password=$(cat "$PASSWD_FILE")
-    rcon 127.0.0.1 "$RCON_PORT" "$password" "say $*" 2>/dev/null || true
+    rcon --password-file "$PASSWD_FILE" 127.0.0.1 "$RCON_PORT" "say $*" 2>/dev/null || true
 }
 
 rcon_exec() {
-    local password
-    password=$(cat "$PASSWD_FILE")
-    rcon 127.0.0.1 "$RCON_PORT" "$password" "$*" 2>/dev/null || true
+    rcon --password-file "$PASSWD_FILE" 127.0.0.1 "$RCON_PORT" "$*" 2>/dev/null || true
 }
 
 # Only run the warning sequence if RCON is configured and reachable.

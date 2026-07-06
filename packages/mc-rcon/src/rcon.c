@@ -12,6 +12,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -111,12 +112,24 @@ static int pkt_send(int fd, int32_t id, int32_t type, const char *payload)
     int32_t le_id       = (int32_t)u32_to_le((uint32_t)id);
     int32_t le_type     = (int32_t)u32_to_le((uint32_t)type);
 
-    if (send_all(fd, &le_len,  4)                  < 0) return -1;
-    if (send_all(fd, &le_id,   4)                  < 0) return -1;
-    if (send_all(fd, &le_type, 4)                  < 0) return -1;
-    if (send_all(fd, payload, (size_t)payload_len) < 0) return -1;
-    if (send_all(fd, "\x00\x00", 2)                < 0) return -1;  /* protocol terminator */
-    return 0;
+    /* Build the whole packet in one buffer and send it with a single write
+     * loop. Writing the header, payload, and pad as separate send_all() calls
+     * lets them land as separate TCP segments; some server RCON parsers
+     * (observed against modern vanilla Minecraft servers) mis-frame the
+     * following packet when a message arrives split like that, breaking the
+     * connection right after the first exchange. */
+    size_t total_len = (size_t)PKT_OVERHEAD + (size_t)payload_len;
+    char *buf = malloc(4 + total_len);
+    if (!buf) return -1;
+    memcpy(buf,      &le_len,  4);
+    memcpy(buf + 4,  &le_id,   4);
+    memcpy(buf + 8,  &le_type, 4);
+    memcpy(buf + 12, payload, (size_t)payload_len);
+    memcpy(buf + 12 + payload_len, "\x00\x00", 2);
+
+    int rc = send_all(fd, buf, 4 + total_len);
+    free(buf);
+    return rc;
 }
 
 /*
@@ -354,34 +367,133 @@ static int run_interactive(int fd, const char *host, const char *port)
     }
 }
 
+/*
+ * Read the RCON password from a file into out (NUL-terminated, at most
+ * out_sz-1 bytes). A single trailing newline / CR is stripped so a file
+ * written by `... > server.passwd` (base64 leaves a trailing '\n') matches
+ * what `$(cat file)` would have produced. Returns 0 on success, -1 on error.
+ *
+ * Reading from a file keeps the secret out of argv (/proc/<pid>/cmdline, which
+ * is world-readable) and out of the environment (/proc/<pid>/environ) entirely.
+ */
+static int read_password_file(const char *path, char *out, size_t out_sz)
+{
+    /* O_CLOEXEC so the descriptor can't leak into any process we might spawn. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "rcon: cannot open password file '%s': %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+
+    size_t total = 0;
+    while (total < out_sz - 1) {
+        ssize_t n = read(fd, out + total, out_sz - 1 - total);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "rcon: error reading password file '%s': %s\n",
+                    path, strerror(errno));
+            explicit_bzero(out, out_sz);
+            close(fd);
+            return -1;
+        }
+        if (n == 0) break;  /* EOF */
+        total += (size_t)n;
+    }
+    close(fd);
+
+    out[total] = '\0';
+    /* Strip a single trailing line ending (\n, \r, or \r\n). */
+    while (total > 0 && (out[total - 1] == '\n' || out[total - 1] == '\r'))
+        out[--total] = '\0';
+
+    if (total == 0) {
+        fprintf(stderr, "rcon: password file '%s' is empty\n", path);
+        return -1;
+    }
+    return 0;
+}
+
+static void usage(const char *prog)
+{
+    fprintf(stderr,
+        "Usage: %s [--password-file <path>] <host> <port> [<password>] [command ...]\n"
+        "\n"
+        "  -f, --password-file <path>  Read the RCON password from <path> instead of\n"
+        "                              the command line. Preferred: keeps the secret\n"
+        "                              out of argv (/proc/<pid>/cmdline) and the\n"
+        "                              process environment.\n"
+        "\n"
+        "  If --password-file is omitted, <password> must be given positionally\n"
+        "  (legacy form). The positional password is scrubbed from argv at startup,\n"
+        "  but is briefly visible to other local processes before that happens.\n",
+        prog);
+}
+
 /* ── Main ────────────────────────────────────────────────────────────────── */
 
 int main(int argc, char *argv[])
 {
-    if (argc < 4) {
-        fprintf(stderr, "Usage: %s <host> <port> <password> [command ...]\n", argv[0]);
-        return 1;
-    }
-
     /* Ignore SIGPIPE so that write() returns -1/EPIPE when the server closes
      * the connection mid-send, rather than killing the process silently. */
     signal(SIGPIPE, SIG_IGN);
 
-    const char *host = argv[1];
-    const char *port = argv[2];
+    /* Parse any leading options. Option parsing stops at the first positional
+     * argument, so command words (which follow host/port) are never mistaken
+     * for options even if they begin with '-'. */
+    const char *pw_file = NULL;
+    int i = 1;
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != '\0') {
+        if (strcmp(argv[i], "--password-file") == 0 || strcmp(argv[i], "-f") == 0) {
+            if (i + 1 >= argc) { usage(argv[0]); return 1; }
+            pw_file = argv[i + 1];
+            i += 2;
+        } else if (strcmp(argv[i], "--") == 0) {
+            i++;
+            break;
+        } else {
+            fprintf(stderr, "rcon: unknown option '%s'\n\n", argv[i]);
+            usage(argv[0]);
+            return 1;
+        }
+    }
 
-    /* Copy the password into a local buffer, then overwrite argv[3] with '*'
-     * characters so the plaintext password doesn't remain visible in
-     * /proc/<pid>/cmdline or `ps` output after we've read it. */
+    /* Remaining positionals: <host> <port> [<password>] [command ...].
+     * The positional password is required only when --password-file is absent. */
+    int need = pw_file ? 2 : 3;
+    if (argc - i < need) {
+        usage(argv[0]);
+        return 1;
+    }
+
+    const char *host = argv[i];
+    const char *port = argv[i + 1];
+
     char password[MAX_PAYLOAD + 1];
-    size_t pw_len = strlen(argv[3]);
-    if (pw_len > MAX_PAYLOAD) pw_len = MAX_PAYLOAD;
-    memcpy(password, argv[3], pw_len);
-    password[pw_len] = '\0';
-    memset(argv[3], '*', strlen(argv[3]));
+    int cmd_start;  /* index of the first command word; >= argc means none */
+
+    if (pw_file) {
+        if (read_password_file(pw_file, password, sizeof(password)) < 0)
+            return 1;
+        cmd_start = i + 2;
+    } else {
+        /* Legacy positional password. Copy it out, then overwrite the argv slot
+         * with '*' so the plaintext doesn't remain visible in /proc/<pid>/cmdline
+         * or `ps`. There's still a race before this runs — prefer --password-file. */
+        char *pw_arg = argv[i + 2];
+        size_t pw_len = strlen(pw_arg);
+        if (pw_len > MAX_PAYLOAD) pw_len = MAX_PAYLOAD;
+        memcpy(password, pw_arg, pw_len);
+        password[pw_len] = '\0';
+        memset(pw_arg, '*', strlen(pw_arg));
+        cmd_start = i + 3;
+    }
 
     int fd = rcon_connect(host, port);
-    if (fd < 0) return 1;
+    if (fd < 0) {
+        explicit_bzero(password, sizeof(password));
+        return 1;
+    }
 
     int auth_result = rcon_auth(fd, password);
 
@@ -395,8 +507,8 @@ int main(int argc, char *argv[])
     }
 
     int ret;
-    if (argc > 4) {
-        char *cmd = build_command(argc, argv, 4);
+    if (cmd_start < argc) {
+        char *cmd = build_command(argc, argv, cmd_start);
         if (!cmd) { close(fd); return 1; }
 
         char *resp = rcon_exec(fd, cmd);

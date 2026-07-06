@@ -20,5 +20,5 @@ SERVER_PORT="25565"
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 RCON_PORT=$((SERVER_PORT + 10))
 
-password=$(cat "$PASSWD_FILE")
-rcon 127.0.0.1 "$RCON_PORT" "$password" "reload"
+# Pass the password by file so it never appears in argv or a shell variable.
+rcon --password-file "$PASSWD_FILE" 127.0.0.1 "$RCON_PORT" "reload"
