@@ -124,6 +124,7 @@ load_config() {
 
     [[ -f "$MC_CONFIG/defaults.conf" ]] && source "$MC_CONFIG/defaults.conf"
     [[ -f "$SERVER_CONF"             ]] && source "$SERVER_CONF"
+    return 0
 }
 
 write_config() {

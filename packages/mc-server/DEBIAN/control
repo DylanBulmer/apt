@@ -1,9 +1,9 @@
 Package: mc-server
-Version: 0.3.0
+Version: 0.3.1
 Architecture: all
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
 Depends: curl, jq, unzip
-Recommends: rsync, mc-rcon
+Recommends: rsync, mc-rcon, bash-completion
 Section: admin
 Priority: optional
 Homepage: https://apt.bulmer.dev
