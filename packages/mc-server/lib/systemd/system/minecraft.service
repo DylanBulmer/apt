@@ -33,9 +33,29 @@ ExecStart=/usr/lib/mc/start.sh
 ExecStop=/usr/lib/mc/stop.sh
 ExecReload=/usr/lib/mc/reload.sh
 
-# Allow up to 5 min 30 s for the graceful shutdown sequence (5-min countdown
-# + 30 s buffer) before systemd sends SIGKILL.
-TimeoutStopSec=330s
+# Outer bound on the whole stop procedure (ExecStop + SIGTERM) before systemd
+# sends SIGKILL. Derived from the worst-case path through stop.sh — the
+# 5-minute tier, taken whenever at least one player is online OR the player
+# count cannot be determined (everything except a provably empty server):
+#
+#   list query           15 s   (RCON_CMD_TIMEOUT)
+#   countdown 300 180 60
+#     sleeps             300 s  (120 + 120 + 60)
+#     3x say announce     15 s  (3 x RCON_SAY_TIMEOUT, worst case)
+#   stop command         15 s   (RCON_CMD_TIMEOUT)
+#   chunk-flush sleep     10 s
+#   ------------------------------
+#   worst case           355 s
+#   safety buffer         20 s
+#   ------------------------------
+#   TimeoutStopSec       375 s
+#
+# On a healthy server the RCON calls are sub-millisecond, so the real elapsed
+# time is ~310 s and the JVM gets ~65 s after SIGTERM to finish exiting.
+#
+# If you change RCON_SAY_TIMEOUT / RCON_CMD_TIMEOUT or the countdown tiers in
+# stop.sh, recompute this value.
+TimeoutStopSec=375s
 TimeoutStartSec=60s
 
 # Only kill the main process; ExecStop handles the rest.

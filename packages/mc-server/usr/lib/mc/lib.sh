@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 # Core library sourced by /usr/bin/mc
 
-MC_BASE="/opt/minecraft"
-MC_BACKUP="/var/backups/minecraft"
-MC_CONFIG="/etc/minecraft"
-SERVER_CONF="$MC_CONFIG/server.conf"
-PASSWD_FILE="$MC_CONFIG/server.passwd"
-MRPACK_MANIFEST="$MC_CONFIG/server.mrpack.json"
-LOCK_FILE="/run/minecraft/mc.lock"
-MC_USER="minecraft"
+# Paths, config loading, Java resolution and RCON invocation are shared with the
+# systemd-facing scripts (start/stop/reload), which cannot source this file —
+# they run unprivileged and need none of the command implementations below.
+# shellcheck source=/usr/lib/mc/common.sh
+source /usr/lib/mc/common.sh
 
 # ── Output helpers ─────────────────────────────────────────────────────────────
 
@@ -28,104 +25,41 @@ require_server() {
         || die "No server installed. Run: mc install"
 }
 
-# ── Java version helpers ───────────────────────────────────────────────────────
+# ── Plugin command registry ────────────────────────────────────────────────────
 
-mc_required_java() {
-    local mc_ver="$1"
-    local major minor patch
-    IFS='.' read -r major minor patch <<< "$mc_ver"
-    major="${major:-0}"
-    minor="${minor:-0}"
-    patch="${patch:-0}"
+# Subcommands contributed by plugins in /usr/lib/mc/commands.d/ (e.g. mc-rcon
+# adds 'rcon'). A plugin declares itself with:
+#
+#     mc_register_command rcon
+#
+# /usr/bin/mc dispatches an unrecognised subcommand ONLY if it appears here.
+# Previously the dispatcher accepted any name resolving to a `cmd_*` function,
+# which made internal helpers reachable from the command line — `mc
+# install_mrpack pack.mrpack` entered cmd_install_mrpack directly, bypassing the
+# require_root, acquire_lock and load_config that cmd_install performs first.
+MC_PLUGIN_COMMANDS=()
 
-    # Mojang switched to a new versioning scheme after 1.21.x.
-    # Versions 26.x.x and above use the new format and require Java 25.
-    if   [[ "$major" -ge 26 ]];                                then echo 25
-    # Past 1.x.x versioning
-    elif [[ "$minor" -ge 21 ]] \
-      || [[ "$minor" -eq 20 && "$patch" -ge 5 ]];              then echo 21
-    elif [[ "$minor" -ge 18 ]];                                then echo 17
-    else                                                            echo 8
-    fi
-}
-
-java_major_version() {
-    local bin="${1:-java}"
-    local raw
-    raw=$("$bin" -version 2>&1 | awk -F '"' '/version/ { print $2 }')
-    if [[ "$raw" == 1.* ]]; then
-        echo "${raw#1.}" | cut -d. -f1
-    else
-        echo "${raw%%.*}"
-    fi
-}
-
-find_java_binary() {
-    local required="$1"
-    local bin
-
-    while IFS= read -r bin; do
-        [[ -x "$bin" ]] || continue
-        [[ "$bin" =~ -${required}([^0-9]|$) ]] && { echo "$bin"; return 0; }
-    done < <(update-alternatives --list java 2>/dev/null)
-
-    local candidate
-    for candidate in \
-        "/usr/lib/jvm/java-${required}-openjdk-amd64/bin/java" \
-        "/usr/lib/jvm/java-${required}-openjdk-arm64/bin/java" \
-        "/usr/lib/jvm/java-${required}-openjdk/bin/java" \
-        "/usr/lib/jvm/temurin-${required}-amd64/bin/java" \
-        "/usr/lib/jvm/temurin-${required}/bin/java" \
-        "/usr/lib/jvm/java-${required}-amazon-corretto-amd64/bin/java" \
-        "/usr/lib/jvm/java-${required}-amazon-corretto/bin/java"; do
-        [[ -x "$candidate" ]] && { echo "$candidate"; return 0; }
+mc_register_command() {
+    local name
+    for name in "$@"; do
+        [[ -n "$name" ]] && MC_PLUGIN_COMMANDS+=("$name")
     done
+    return 0
+}
 
+# True if $1 was registered by a plugin.
+mc_is_plugin_command() {
+    local target="${1:-}" name
+    [[ -n "$target" ]] || return 1
+    for name in ${MC_PLUGIN_COMMANDS[@]+"${MC_PLUGIN_COMMANDS[@]}"}; do
+        [[ "$name" == "$target" ]] && return 0
+    done
     return 1
 }
 
-# Ensure a JRE for the given major version is available, installing it via
-# apt if missing. Interactive callers (a terminal attached, no --yes) are
-# prompted for confirmation; non-interactive callers (Docker entrypoint,
-# --yes) install without asking.
-ensure_java() {
-    # assume_yes is passed down by the caller, not parsed here; ${2:-no} is just a fallback.
-    local required="$1" assume_yes="${2:-no}"
-    find_java_binary "$required" &>/dev/null && return 0
+# ── Config ──────────────────────────────────────────────────────────────
 
-    local pkg="openjdk-${required}-jre-headless"
-
-    if [[ "$assume_yes" != "yes" ]]; then
-        if [[ ! -t 0 ]]; then
-            die "Java ${required} is required but not installed. Re-run with --yes, or install manually: apt install ${pkg}"
-        fi
-        local confirm
-        read -rp "Minecraft requires Java ${required}, which isn't installed. Install ${pkg} now? [y/N] " confirm
-        [[ "$confirm" =~ ^[Yy]$ ]] || die "Java ${required} is required. Install manually: apt install ${pkg}"
-    fi
-
-    info "Installing ${pkg}..."
-    apt-get update -qq && apt-get install -y --no-install-recommends "$pkg" \
-        || die "Failed to install ${pkg}. Install manually: apt install ${pkg}"
-}
-
-# ── Config ─────────────────────────────────────────────────────────────────────
-
-load_config() {
-    SERVER_TYPE="${DEFAULT_SERVER_TYPE:-vanilla}"
-    MINECRAFT_VERSION="latest"
-    JAVA_VERSION=""
-    SERVER_RAM="4G"
-    SERVER_FLAGS=""
-    JAVA_OPTS=""
-    SERVER_PORT="25565"
-    BACKUP_KEEP="7"
-    BACKUP_SCHEDULE="daily"
-
-    [[ -f "$MC_CONFIG/defaults.conf" ]] && source "$MC_CONFIG/defaults.conf"
-    [[ -f "$SERVER_CONF"             ]] && source "$SERVER_CONF"
-    return 0
-}
+# load_config() is in common.sh — start.sh needs it too.
 
 write_config() {
     mkdir -p "$MC_CONFIG"
@@ -153,6 +87,70 @@ EOF
     fi
 }
 
+# ── Cleanup registry ───────────────────────────────────────────────────────────
+
+# bash supports exactly ONE EXIT trap, so every cleanup duty has to funnel
+# through a single handler. Call sites register/deregister duties here instead
+# of calling `trap` themselves — previously each `trap ... EXIT` silently
+# replaced the lock-file trap and a later `trap - EXIT` discarded everything,
+# leaking /run/minecraft/mc.lock on every install/upgrade/backup (which then
+# produced a spurious "Removing stale lock" warning on the next run).
+
+_MC_CLEANUP_TRAP_SET="no"     # whether the single EXIT trap is installed
+_MC_CLEANUP_LOCK=""           # lock file to remove on exit ("" = none held)
+_MC_CLEANUP_DIRS=()           # staging dirs to remove on exit
+_MC_CLEANUP_SAVE_ON="no"      # "yes" = an interrupted backup must re-enable saves
+
+# The single EXIT handler. Duties run most-server-affecting first.
+mc_cleanup() {
+    local status=$?
+
+    if [[ "$_MC_CLEANUP_SAVE_ON" == "yes" ]]; then
+        _MC_CLEANUP_SAVE_ON="no"
+        rcon_command "save-on" 2>/dev/null || true
+    fi
+
+    local dir
+    for dir in ${_MC_CLEANUP_DIRS[@]+"${_MC_CLEANUP_DIRS[@]}"}; do
+        [[ -n "$dir" ]] && rm -rf "$dir"
+    done
+    _MC_CLEANUP_DIRS=()
+
+    if [[ -n "$_MC_CLEANUP_LOCK" ]]; then
+        rm -f "$_MC_CLEANUP_LOCK"
+        _MC_CLEANUP_LOCK=""
+    fi
+
+    return $status
+}
+
+# Install the one and only EXIT trap. Idempotent.
+mc_cleanup_arm() {
+    if [[ "$_MC_CLEANUP_TRAP_SET" != "yes" ]]; then
+        _MC_CLEANUP_TRAP_SET="yes"
+        trap mc_cleanup EXIT
+    fi
+    return 0
+}
+
+# Register a staging dir for removal if the shell exits before it is committed.
+cleanup_register_dir() {
+    [[ -n "${1:-}" ]] || return 0
+    _MC_CLEANUP_DIRS+=("$1")
+    mc_cleanup_arm
+}
+
+# Drop a staging dir from the registry once the caller has committed/removed it.
+cleanup_unregister_dir() {
+    local target="${1:-}" dir
+    local -a kept=()
+    for dir in ${_MC_CLEANUP_DIRS[@]+"${_MC_CLEANUP_DIRS[@]}"}; do
+        [[ "$dir" == "$target" ]] || kept+=("$dir")
+    done
+    _MC_CLEANUP_DIRS=(${kept[@]+"${kept[@]}"})
+    return 0
+}
+
 # ── Process lock ───────────────────────────────────────────────────────────────
 
 acquire_lock() {
@@ -170,7 +168,8 @@ acquire_lock() {
     fi
 
     printf '%s\n%s\n' "$$" "${_MC_CMD:-unknown}" > "$LOCK_FILE"
-    trap 'rm -f "$LOCK_FILE"' EXIT
+    _MC_CLEANUP_LOCK="$LOCK_FILE"
+    mc_cleanup_arm
 }
 
 # ── Systemd helpers ────────────────────────────────────────────────────────────
@@ -181,21 +180,23 @@ is_running() {
 
 # ── RCON helpers ───────────────────────────────────────────────────────────────
 
-rcon_available() {
-    [[ -f "$PASSWD_FILE" ]] && command -v rcon >/dev/null 2>&1
-}
+# Kept as the name the command implementations (and the mc-rcon plugin) use.
+rcon_available() { mc_rcon_available; }
 
 generate_rcon_password() {
     head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
 }
 
 # Send a single RCON command. Returns 1 if RCON is not configured or unavailable.
+# load_config first, because the port is derived from SERVER_PORT.
+#
+# The MC_RCON_TIMEOUT budget matters most on the backup path — save-off/save-all
+# run with the world's saves disabled, so a hang there would leave the server
+# unable to persist chunks indefinitely.
 rcon_command() {
     rcon_available || return 1
     load_config
-    local port=$((SERVER_PORT + 10))
-    # Pass the password by file so it never appears in argv or a shell variable.
-    rcon --password-file "$PASSWD_FILE" 127.0.0.1 "$port" "$@" 2>/dev/null
+    mc_rcon_call "$MC_RCON_TIMEOUT" "$@" 2>/dev/null
 }
 
 # ── server.properties helpers ──────────────────────────────────────────────────
@@ -452,10 +453,19 @@ MRPACK_URL_ALLOWLIST=(
     "cdn-raw.modrinth.com"
 )
 
+# Returns 0 only for an https URL whose host is exactly an allowlisted CDN.
+# The match is anchored at the start of the string: the previous `sed` form
+# extracted the host from the first "https://" found *anywhere*, so a value like
+# "-Ksomefile#https://cdn.modrinth.com/x" passed the allowlist and was then
+# handed to curl as an argv element beginning with '-' (option injection).
+# Anchoring rejects that outright; callers additionally pass the value via
+# `curl --url` so it can never be parsed as an option.
 mrpack_url_allowed() {
     local url="$1"
-    local host
-    host=$(echo "$url" | sed 's|https://\([^/]*\).*|\1|')
+    [[ "$url" == https://* ]] || return 1
+    local rest="${url#https://}"
+    local host="${rest%%/*}"     # everything up to the first '/', if any
+    local allowed
     for allowed in "${MRPACK_URL_ALLOWLIST[@]}"; do
         [[ "$host" == "$allowed" ]] && return 0
     done
@@ -493,6 +503,18 @@ mrpack_safe_path() {
 cmd_install_mrpack() {
     # assume_yes is passed down by cmd_install/cmd_upgrade, not parsed here.
     local mrpack_file="$1" assume_yes="${2:-no}"
+
+    # Seed config defaults before anything else. cmd_install/cmd_upgrade have
+    # already done this, but /usr/bin/mc's plugin fallback dispatches ANY
+    # cmd_* function by name, so `mc install_mrpack pack.mrpack` reaches this
+    # function directly. Without this call, SERVER_RAM / SERVER_PORT /
+    # BACKUP_KEEP / BACKUP_SCHEDULE / JAVA_OPTS are never initialised and
+    # write_config() below aborts under `set -u` — after the pack has already
+    # been rsynced into MC_BASE, leaving an installed server with no
+    # server.conf. Re-running load_config on the normal path is harmless: the
+    # values it seeds for SERVER_TYPE / MINECRAFT_VERSION are unconditionally
+    # replaced from the manifest a few lines below.
+    load_config
 
     [[ -f "$mrpack_file" ]] || die "File not found: $mrpack_file"
     command -v unzip >/dev/null 2>&1 \
@@ -532,7 +554,7 @@ cmd_install_mrpack() {
     # ── Stage everything ───────────────────────────────────────────────────────
     local staging
     staging=$(make_staging_dir)
-    trap 'rm -rf "$staging"' EXIT
+    cleanup_register_dir "$staging"
 
     # ── Install server platform ────────────────────────────────────────────────
     if [[ "$SERVER_TYPE" == "neoforge" ]]; then
@@ -543,40 +565,89 @@ cmd_install_mrpack() {
     fi
 
     # ── Download mod files from manifest ─────────────────────────────────────
-    local file_count i
-    file_count=$(echo "$manifest" | jq '.files | length')
-    for (( i=0; i<file_count; i++ )); do
-        local path env_server url sha512
-        path=$(      echo "$manifest" | jq -r ".files[$i].path")
-        env_server=$(echo "$manifest" | jq -r ".files[$i].env.server // \"required\"")
-        [[ "$env_server" == "unsupported" ]] && continue
+    # Three phases: (1) parse + validate every entry with no network I/O at all,
+    # (2) fetch, (3) verify. Validating first means an unsafe pack aborts before
+    # a single byte is downloaded.
+    #
+    # The manifest is parsed by ONE jq pass into TSV rather than 4 jq processes
+    # per entry (each of which re-parsed the whole document): ~2.6 s -> ~4 ms on
+    # a 200-mod pack.
+    local files_tsv
+    files_tsv=$(echo "$manifest" | jq -r '
+        (.files // [])[]
+        | select((.env.server // "required") != "unsupported")
+        | [.path, .downloads[0], .hashes.sha512] | @tsv') \
+        || die "Failed to parse the file list from modrinth.index.json"
+
+    local -a dl_paths=() dl_urls=() dl_hashes=()
+    local path url sha512 dest resolved
+
+    # NOTE: fed by process substitution, NOT a pipe. A pipe would run the loop
+    # body in a subshell, where `die` exits only that subshell and the install
+    # would carry on past a rejected path — a fail-open security regression.
+    while IFS=$'\t' read -r path url sha512; do
+        [[ -n "$path" ]] || continue
 
         # Reject path traversal before the path is ever used as a destination.
         mrpack_safe_path "$path" \
             || die "Refusing unsafe file path in mrpack manifest: '$path'"
 
-        url=$(echo "$manifest" | jq -r ".files[$i].downloads[0]")
+        # Unlike an unsafe path, a non-allowlisted URL is a skip, not an abort.
         if ! mrpack_url_allowed "$url"; then
             warn "Skipping '$path': download URL not in allowlist ($url)"
             continue
         fi
 
-        sha512=$(echo "$manifest" | jq -r ".files[$i].hashes.sha512")
-
-        local dest="${staging}/${path}"
+        dest="${staging}/${path}"
         # Defence in depth: confirm the resolved destination stays inside staging.
-        local resolved
         resolved=$(realpath -m "$dest")
         case "$resolved/" in
             "$staging"/*) : ;;
             *) die "Refusing path escaping staging dir: '$path'" ;;
         esac
-        mkdir -p "$(dirname "$dest")"
-        info "Downloading: $path"
-        curl -sf --proto '=https' -o "$dest" "$url" || die "Failed to download $path"
 
-        verify_sha "$dest" sha512 "$sha512"
-    done
+        dl_paths+=("$path")
+        dl_urls+=("$url")
+        dl_hashes+=("$sha512")
+    done < <(printf '%s\n' "$files_tsv")
+
+    local total=${#dl_paths[@]}
+    if (( total > 0 )); then
+        info "Downloading ${total} pack file(s)..."
+
+        # One curl process for the whole set: the CDN connection is reused
+        # instead of a fresh TCP+TLS handshake per mod (~30 s of pure handshake
+        # on a 200-mod pack). --parallel additionally overlaps transfers.
+        # Both flags are feature-detected (curl >= 7.66 / >= 7.67); older curl
+        # errors out on unknown options rather than ignoring them, and
+        # --parallel ignores -s, so it needs --no-progress-meter to stay quiet.
+        local -a curl_args=() curl_parallel=()
+        local curl_help
+        curl_help=$(curl --help all 2>/dev/null) || curl_help=""
+        if grep -q -- '--parallel-max' <<<"$curl_help" \
+           && grep -q -- '--no-progress-meter' <<<"$curl_help"; then
+            curl_parallel=(--parallel --parallel-max 8 --no-progress-meter)
+        fi
+
+        local n
+        for (( n=0; n<total; n++ )); do
+            mkdir -p "$(dirname "${staging}/${dl_paths[n]}")"
+            # --url keeps a hostile URL from ever being read as a curl option.
+            curl_args+=(-o "${staging}/${dl_paths[n]}" --url "${dl_urls[n]}")
+        done
+
+        curl -sf --proto '=https' ${curl_parallel[@]+"${curl_parallel[@]}"} \
+            "${curl_args[@]}" \
+            || die "Failed to download one or more pack files."
+
+        # Every downloaded file is verified; verify_sha is fail-closed, so an
+        # empty or "null" manifest hash aborts the install.
+        for (( n=0; n<total; n++ )); do
+            dest="${staging}/${dl_paths[n]}"
+            [[ -f "$dest" ]] || die "Download produced no file for '${dl_paths[n]}'."
+            verify_sha "$dest" sha512 "${dl_hashes[n]}"
+        done
+    fi
 
     # ── Extract overrides (server-overrides/ takes precedence) ────────────────
     # Extract overrides/ first, then server-overrides/ on top.
@@ -584,22 +655,22 @@ cmd_install_mrpack() {
     # a symlink pointing outside the tree (e.g. -> /etc) would otherwise be copied
     # into MC_BASE and could later be written through. Legitimate packs ship plain
     # files, not links.
-    if unzip -l "$mrpack_file" 2>/dev/null | grep -q "overrides/"; then
-        unzip -q -o -d "${staging}/_ov" "$mrpack_file" "overrides/*" 2>/dev/null || true
-        if [[ -d "${staging}/_ov/overrides" ]]; then
-            find "${staging}/_ov/overrides" -type l -delete
-            rsync -a "${staging}/_ov/overrides/" "${staging}/"
-            rm -rf "${staging}/_ov"
-        fi
+    # The `unzip -l | grep` probes are gone: they re-read the whole archive just
+    # to decide whether to re-read it again. Attempting the extraction and then
+    # testing for the resulting directory is equivalent and halves the reads.
+    unzip -q -o -d "${staging}/_ov" "$mrpack_file" "overrides/*" 2>/dev/null || true
+    if [[ -d "${staging}/_ov/overrides" ]]; then
+        find "${staging}/_ov/overrides" -type l -delete
+        rsync -a "${staging}/_ov/overrides/" "${staging}/"
     fi
-    if unzip -l "$mrpack_file" 2>/dev/null | grep -q "server-overrides/"; then
-        unzip -q -o -d "${staging}/_sov" "$mrpack_file" "server-overrides/*" 2>/dev/null || true
-        if [[ -d "${staging}/_sov/server-overrides" ]]; then
-            find "${staging}/_sov/server-overrides" -type l -delete
-            rsync -a "${staging}/_sov/server-overrides/" "${staging}/"
-            rm -rf "${staging}/_sov"
-        fi
+    rm -rf "${staging}/_ov"
+
+    unzip -q -o -d "${staging}/_sov" "$mrpack_file" "server-overrides/*" 2>/dev/null || true
+    if [[ -d "${staging}/_sov/server-overrides" ]]; then
+        find "${staging}/_sov/server-overrides" -type l -delete
+        rsync -a "${staging}/_sov/server-overrides/" "${staging}/"
     fi
+    rm -rf "${staging}/_sov"
 
     # ── Commit to server directory (atomic rename) ────────────────────────────
     mkdir -p "$MC_BASE"
@@ -615,7 +686,7 @@ cmd_install_mrpack() {
     fi
 
     rsync -a "${staging}/" "${MC_BASE}/"
-    trap - EXIT
+    cleanup_unregister_dir "$staging"
     rm -rf "$staging"
 
     # Save manifest for future upgrades.
@@ -671,7 +742,7 @@ cmd_install() {
 
     local staging
     staging=$(make_staging_dir)
-    trap 'rm -rf "$staging"' EXIT
+    cleanup_register_dir "$staging"
 
     if [[ "$SERVER_TYPE" == "neoforge" ]]; then
         install_neoforge "$MINECRAFT_VERSION" "$staging"
@@ -681,14 +752,14 @@ cmd_install() {
         download_jar "$SERVER_TYPE" "$MINECRAFT_VERSION" "$tmp_jar"
         MINECRAFT_VERSION="$RESOLVED_VERSION"
         mv "$tmp_jar" "$MC_BASE/server.jar"
-        trap - EXIT
+        cleanup_unregister_dir "$staging"
         rm -rf "$staging"
         staging=""
     fi
 
     if [[ -n "$staging" ]]; then
         rsync -a "${staging}/" "${MC_BASE}/"
-        trap - EXIT
+        cleanup_unregister_dir "$staging"
         rm -rf "$staging"
     fi
 
@@ -752,20 +823,20 @@ cmd_upgrade() {
 
         local staging
         staging=$(make_staging_dir)
-        trap 'rm -rf "$staging"' EXIT
+        cleanup_register_dir "$staging"
 
         if [[ "$SERVER_TYPE" == "neoforge" ]]; then
             install_neoforge "$MINECRAFT_VERSION" "$staging"
             MINECRAFT_VERSION="$RESOLVED_VERSION"
             rsync -a "${staging}/" "${MC_BASE}/"
-            trap - EXIT
+            cleanup_unregister_dir "$staging"
             rm -rf "$staging"
         else
             local tmp_jar="${staging}/server.jar"
             download_jar "$SERVER_TYPE" "$MINECRAFT_VERSION" "$tmp_jar"
             MINECRAFT_VERSION="$RESOLVED_VERSION"
             mv "$tmp_jar" "$MC_BASE/server.jar"
-            trap - EXIT
+            cleanup_unregister_dir "$staging"
             rm -rf "$staging"
         fi
 
@@ -790,12 +861,15 @@ cmd_start() {
     require_server
     is_running && die "Server is already running."
     systemctl start minecraft
-    # Wait up to 60 s for the unit to reach active state.
+    # Wait up to 60 s for the unit to reach active state. Poll at 0.5 s and
+    # check *before* the first sleep: the old 5 s-first loop charged a server
+    # that was already active a full 5 s of dead time.
     local i
-    for (( i=0; i<12; i++ )); do
-        sleep 5
+    for (( i=0; i<120; i++ )); do
         is_running && { info "Server started."; return 0; }
+        sleep 0.5
     done
+    is_running && { info "Server started."; return 0; }
     error "Server did not reach active state within 60 s."
     error "Check logs with: mc logs"
     return 1
@@ -835,9 +909,11 @@ cmd_backup() {
     require_server
     load_config
 
-    local timestamp backup_file
+    local timestamp backup_file base_name parent_dir
     timestamp=$(date +%Y%m%d-%H%M%S)
     backup_file="${MC_BACKUP}/minecraft-${timestamp}.tar.gz"
+    base_name=$(basename "$MC_BASE")
+    parent_dir=$(dirname "$MC_BASE")
     mkdir -p "$MC_BACKUP"
 
     local was_running=false
@@ -849,16 +925,47 @@ cmd_backup() {
         sleep 3
     fi
 
-    # Ensure save-on is restored even if the script is interrupted.
-    local save_on_needed=$was_running
-    trap '[[ "$save_on_needed" == "true" ]] && rcon_command "save-on" 2>/dev/null || true' EXIT
+    # Ensure save-on is restored even if the script is interrupted. This duty
+    # lives in the cleanup registry rather than in a `local` referenced by an
+    # ad-hoc EXIT trap: a `local` is out of scope whenever the shell exits from
+    # outside this function, so the old trap could silently leave saves off.
+    if $was_running; then
+        _MC_CLEANUP_SAVE_ON="yes"
+        mc_cleanup_arm
+    fi
+
+    # Regenerated/derived data — excluded to shrink the archive and shorten the
+    # save-off window. libraries/ and mods/ are deliberately NOT excluded:
+    # cmd_restore is a plain untar with no re-download step, so dropping them
+    # would produce an unbootable restore.
+    local -a tar_excludes=(
+        "--exclude=${base_name}/logs"
+        "--exclude=${base_name}/crash-reports"
+        "--exclude=${base_name}/cache"
+    )
 
     info "Creating backup: $backup_file"
-    tar -czf "$backup_file" -C "$(dirname "$MC_BASE")" "$(basename "$MC_BASE")" \
-        || die "tar failed; backup not created."
+    if command -v pigz >/dev/null 2>&1; then
+        # Multi-threaded gzip: single-threaded `tar -czf` held the world in
+        # save-off for the entire compression, so chunks could not flush.
+        # lib.sh does not set `pipefail` itself, so both stages are checked
+        # explicitly via PIPESTATUS instead of relying on the pipeline status.
+        local -a rc=()
+        if tar -c "${tar_excludes[@]}" -C "$parent_dir" "$base_name" | pigz > "$backup_file"; then
+            rc=("${PIPESTATUS[@]}")
+        else
+            rc=("${PIPESTATUS[@]}")
+        fi
+        if [[ "${rc[0]:-1}" -ne 0 || "${rc[1]:-1}" -ne 0 ]]; then
+            rm -f "$backup_file"
+            die "Backup failed (tar exit ${rc[0]:-?}, pigz exit ${rc[1]:-?}); backup not created."
+        fi
+    else
+        tar -c "${tar_excludes[@]}" -z -f "$backup_file" -C "$parent_dir" "$base_name" \
+            || { rm -f "$backup_file"; die "tar failed; backup not created."; }
+    fi
 
-    save_on_needed=false  # backup succeeded; clear the trap duty
-    trap - EXIT
+    _MC_CLEANUP_SAVE_ON="no"  # backup succeeded; save-on is handled inline below
 
     if $was_running; then
         rcon_command "save-on"  2>/dev/null || true

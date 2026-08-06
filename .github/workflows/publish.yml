@@ -6,10 +6,22 @@ on:
     tags: ['v*']
     paths:
       - packages/**
+      - scripts/**
+      - repo/conf/**
+      - Dockerfile
+      - nginx.conf
+      - k8s/**
+      - .github/workflows/publish.yml
   pull_request:
     branches: [main]
     paths:
       - packages/**
+      - scripts/**
+      - repo/conf/**
+      - Dockerfile
+      - nginx.conf
+      - k8s/**
+      - .github/workflows/publish.yml
   workflow_dispatch:
     inputs:
       version:
@@ -25,30 +37,134 @@ on:
 permissions:
   contents: read
   packages: write
+  # Required so the republish path can download .deb artifacts from a prior run.
+  actions: read
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  # ── Build ───────────────────────────────────────────────────────────────────
+  # One leg per Debian architecture, on a native runner of that architecture.
+  # Building natively avoids a cross-compilation toolchain for mc-rcon (C).
+  #
+  # mc-server is `Architecture: all`, so it is built on the amd64 leg ONLY —
+  # building it on every leg would produce identical .deb files that reprepro
+  # would then be asked to include twice.
+  build:
+    if: ${{ inputs.republish != true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            build_arch_all: true
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            build_arch_all: false
+
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
-        run: sudo apt-get install -y --no-install-recommends build-essential reprepro
-
-      - name: Build packages
-        if: ${{ inputs.republish != true }}
         run: |
-          bash scripts/build.sh mc-server
-          bash scripts/build.sh mc-rcon
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential rsync
+
+      - name: Build arch-independent packages
+        if: ${{ matrix.build_arch_all }}
+        run: bash scripts/build.sh mc-server
+
+      - name: Build architecture-specific packages
+        run: bash scripts/build.sh mc-rcon
+
+      - name: Verify built package architectures
+        run: |
+          for deb in dist/*.deb; do
+            echo "--- $deb"
+            dpkg-deb --field "$deb" Package Version Architecture
+          done
 
       - name: Upload package artifacts
-        if: ${{ inputs.republish != true }}
         uses: actions/upload-artifact@v4
         with:
-          name: packages
+          name: packages-${{ matrix.arch }}
           path: dist/*.deb
+          if-no-files-found: error
           retention-days: 90
+
+  # ── Publish ─────────────────────────────────────────────────────────────────
+  # Runs once. Collects every architecture's .deb files, signs and indexes them
+  # with reprepro, then builds and pushes the multi-arch nginx image.
+  publish:
+    needs: [build]
+    # `always()` so the republish path (which skips `build` entirely) still runs.
+    if: ${{ always() && needs.build.result != 'failure' && needs.build.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install repository tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends reprepro
+
+      - name: Download package artifacts
+        if: ${{ inputs.republish != true }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          merge-multiple: true
+          path: dist
+
+      # The reprepro pool/dists trees are gitignored and regenerated on every
+      # run, so "republish without rebuilding" means: reuse the .deb files
+      # produced by the last successful run of this workflow.
+      - name: Fetch packages from last successful run
+        if: ${{ inputs.republish == true }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          run_ids=$(gh run list \
+            --workflow publish.yml \
+            --status success \
+            --limit 20 \
+            --json databaseId --jq '.[].databaseId')
+          if [ -z "$run_ids" ]; then
+            echo "::error::No previous successful run of publish.yml to republish from."
+            exit 1
+          fi
+
+          # A republish run skips the build job and so uploads no artifacts of
+          # its own. That means the most recent success is NOT necessarily a run
+          # that produced packages — republishing twice in a row would otherwise
+          # select the previous republish and find nothing. Walk back until we
+          # hit a run that actually has packages-* artifacts.
+          run_id=""
+          for id in $run_ids; do
+            if gh run download "$id" --pattern 'packages-*' --dir artifacts 2>/dev/null; then
+              run_id="$id"
+              break
+            fi
+            echo "Run ${id} has no packages-* artifacts (likely itself a republish); trying the previous one."
+          done
+
+          if [ -z "$run_id" ]; then
+            echo "::error::None of the last 20 successful runs have packages-* artifacts."
+            echo "::error::Artifacts expire after 90 days — run the workflow normally to rebuild."
+            exit 1
+          fi
+
+          echo "Reusing packages from run ${run_id}"
+          mkdir -p dist
+          find artifacts -name '*.deb' -exec cp -v {} dist/ \;
+          if [ -z "$(find dist -name '*.deb' -print -quit)" ]; then
+            echo "::error::Run ${run_id} yielded no .deb files after extraction."
+            exit 1
+          fi
 
       - name: Import GPG signing key
         if: github.event_name != 'pull_request'
@@ -58,11 +174,28 @@ jobs:
           echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
 
       - name: Publish packages to repo
-        if: github.event_name != 'pull_request' && inputs.republish != true
+        if: github.event_name != 'pull_request'
         run: |
-          for deb in dist/*.deb; do
+          shopt -s nullglob
+          debs=(dist/*.deb)
+          if [ ${#debs[@]} -eq 0 ]; then
+            echo "::error::No .deb files available to publish."
+            exit 1
+          fi
+          for deb in "${debs[@]}"; do
             bash scripts/publish.sh "$deb"
           done
+          reprepro -b repo list stable
+
+      - name: Compute image build metadata
+        if: github.event_name != 'pull_request'
+        id: buildmeta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "version=${INPUT_VERSION:-$REF_NAME}"    >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata
         if: github.event_name != 'pull_request'
@@ -77,12 +210,11 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ inputs.version }},enable=${{ inputs.republish == 'true' && inputs.version != '' }}
+            type=raw,value=${{ inputs.version }},enable=${{ inputs.republish == true && inputs.version != '' }}
 
-      - name: Set up QEMU
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-qemu-action@v4
-
+      # No setup-qemu-action: the Dockerfile is COPY-only (no RUN), so nothing
+      # is ever executed at build time and buildx assembles the multi-arch
+      # manifest from the same layers without emulation.
       - name: Set up Docker Buildx
         if: github.event_name != 'pull_request'
         uses: docker/setup-buildx-action@v4
@@ -105,11 +237,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.event.release.tag_name }}
-            RELEASE_TIME=${{ github.event.release.created_at }}
+            VERSION=${{ steps.buildmeta.outputs.version }}
+            RELEASE_TIME=${{ steps.buildmeta.outputs.created }}
             GIT_REPO=${{ github.repository }}
             GIT_COMMIT_SHA=${{ github.sha }}
             GIT_COMMIT_TIME=${{ github.event.head_commit.timestamp }}
             GIT_REF=${{ github.ref_name }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

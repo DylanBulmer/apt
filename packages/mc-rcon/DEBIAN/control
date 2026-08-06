@@ -1,6 +1,6 @@
 Package: mc-rcon
-Version: 0.3.0
-Architecture: amd64
+Version: 0.4.0
+Architecture: any
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
 Depends: mc-server
 Section: admin
