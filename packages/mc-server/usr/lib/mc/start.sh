@@ -61,55 +61,17 @@ FLAGS_ZGC="\
 -XX:+AlwaysPreTouch \
 -XX:+DisableExplicitGC"
 
-# ── Java helpers ───────────────────────────────────────────────────────────────
-
-find_java_binary() {
-    local required="$1"
-    local bin
-
-    while IFS= read -r bin; do
-        [[ -x "$bin" ]] || continue
-        [[ "$bin" =~ -${required}([^0-9]|$) ]] && { echo "$bin"; return 0; }
-    done < <(update-alternatives --list java 2>/dev/null)
-
-    local candidate
-    for candidate in \
-        "/usr/lib/jvm/java-${required}-openjdk-amd64/bin/java" \
-        "/usr/lib/jvm/java-${required}-openjdk-arm64/bin/java" \
-        "/usr/lib/jvm/java-${required}-openjdk/bin/java" \
-        "/usr/lib/jvm/temurin-${required}-amd64/bin/java" \
-        "/usr/lib/jvm/temurin-${required}/bin/java" \
-        "/usr/lib/jvm/java-${required}-amazon-corretto-amd64/bin/java" \
-        "/usr/lib/jvm/java-${required}-amazon-corretto/bin/java"; do
-        [[ -x "$candidate" ]] && { echo "$candidate"; return 0; }
-    done
-
-    return 1
-}
-
-java_major_version() {
-    local bin="${1:-java}"
-    local raw
-    raw=$("$bin" -version 2>&1 | awk -F '"' '/version/ { print $2 }')
-    if [[ "$raw" == 1.* ]]; then
-        echo "${raw#1.}" | cut -d. -f1
-    else
-        echo "${raw%%.*}"
-    fi
-}
-
 # ── Load config ────────────────────────────────────────────────────────────────
 
-SERVER_DIR="/opt/minecraft"
-CONFIG_FILE="/etc/minecraft/server.conf"
+# Paths, load_config() and the Java resolution helpers are shared with the mc
+# CLI. This file deliberately does NOT source lib.sh: that pulls in every
+# command implementation, and this runs unprivileged under ProtectSystem=strict
+# as systemd's ExecStart=.
+# shellcheck source=/usr/lib/mc/common.sh
+source /usr/lib/mc/common.sh
 
-SERVER_RAM="4G"
-SERVER_FLAGS=""
-JAVA_OPTS=""
-JAVA_VERSION=""
-
-[[ -f /etc/minecraft/defaults.conf ]] && source /etc/minecraft/defaults.conf
-[[ -f "$CONFIG_FILE"               ]] && source "$CONFIG_FILE"
+load_config
+SERVER_DIR="$MC_BASE"
 
 # ── Resolve Java binary ────────────────────────────────────────────────────────
 

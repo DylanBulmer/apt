@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define RCON_AUTH     3
@@ -30,6 +31,46 @@
 #define MAX_RESPONSE_PAYLOAD 4096  /* server→client payload limit (Minecraft docs) */
 #define IO_TIMEOUT_S         10    /* seconds before read/write gives up */
 #define PKT_OVERHEAD         10    /* id(4) + type(4) + pad(2) — added to length field */
+
+/* Request-ID tags used by rcon_exec. They only need to be distinct from each
+ * other (and from the auth tag, 1) so the sentinel reply is unambiguous. */
+#define ID_AUTH       1
+#define ID_CMD        2
+#define ID_SENTINEL   3
+
+/*
+ * Bounds on multi-packet response reassembly (see rcon_exec).
+ *
+ * Because we keep reading until the sentinel reply arrives, a hostile or
+ * malfunctioning server could otherwise stream packets at us forever. Two
+ * independent bounds prevent that:
+ *
+ *   MAX_TOTAL_RESPONSE — 1 MiB of accumulated payload. Real-world worst cases
+ *     (`/help` on a heavily modded server, `/list` on a full server) run to a
+ *     few tens of KiB, so this leaves roughly two orders of magnitude of
+ *     headroom while staying a trivially allocatable amount of memory.
+ *
+ *   MAX_RESPONSE_PKTS — 512 packets. A full packet carries 4096 payload bytes,
+ *     so 512 packets could hold 2 MiB — strictly more than the byte cap allows.
+ *     This bound therefore only fires against a server that dribbles many
+ *     small or empty packets while never sending the sentinel reply.
+ *
+ * Those two bounds cap memory, but on their own they do NOT cap time. Every
+ * individual read is capped by SO_RCVTIMEO (IO_TIMEOUT_S), yet a server that
+ * sends one packet just inside each timeout window would satisfy the per-read
+ * limit 512 times over: ~85 minutes for a single command. That matters because
+ * mc-server's stop.sh runs this client from systemd's ExecStop=, where
+ * overrunning TimeoutStopSec means a SIGKILL through the JVM's chunk flush —
+ * precisely the world corruption the graceful shutdown exists to prevent.
+ *
+ * CMD_DEADLINE_S therefore puts a hard wall-clock budget on one command's
+ * entire request/response exchange (see deadline_arm / recv_all). 30 s is two
+ * orders of magnitude above a healthy loopback exchange (sub-millisecond) and
+ * still comfortably above a pathologically slow but honest server.
+ */
+#define MAX_TOTAL_RESPONSE   (1024 * 1024)
+#define MAX_RESPONSE_PKTS    512
+#define CMD_DEADLINE_S       30
 
 /* ── Little-endian helpers (work on both LE and BE hosts) ────────────────── */
 
@@ -76,12 +117,77 @@ static int send_all(int fd, const void *buf, size_t remaining)
     return 0;
 }
 
+/* ── Per-command wall-clock deadline ─────────────────────────────────────────
+ *
+ * SO_RCVTIMEO bounds each individual read, but it restarts on every byte that
+ * arrives, so a peer that dribbles data indefinitely is never timed out. These
+ * helpers add an absolute deadline that recv_all enforces across a whole
+ * exchange, no matter how the peer paces the bytes.
+ *
+ * CLOCK_MONOTONIC is used deliberately: unlike CLOCK_REALTIME it cannot be
+ * dragged backwards (or forwards) by NTP or an operator setting the clock
+ * during a shutdown, which would otherwise extend or truncate the budget.
+ */
+static struct timespec g_deadline;
+static int             g_deadline_active = 0;
+
+static void deadline_arm(int seconds)
+{
+    if (clock_gettime(CLOCK_MONOTONIC, &g_deadline) != 0) {
+        /* No usable monotonic clock: leave the deadline disarmed rather than
+         * enforcing a garbage one. SO_RCVTIMEO still applies per read. */
+        g_deadline_active = 0;
+        return;
+    }
+    g_deadline.tv_sec += seconds;
+    g_deadline_active  = 1;
+}
+
+static void deadline_disarm(void)
+{
+    g_deadline_active = 0;
+}
+
+/* Milliseconds left in the budget; <= 0 means expired. LONG_MAX-ish sentinel
+ * is unnecessary — callers check g_deadline_active first. */
+static long deadline_remaining_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    return (long)(g_deadline.tv_sec - now.tv_sec) * 1000L
+         + (long)(g_deadline.tv_nsec - now.tv_nsec) / 1000000L;
+}
+
+/* Clamp the socket's receive timeout to `ms`. Best-effort: a failure here just
+ * leaves the previous (never longer than IO_TIMEOUT_S) value in place. */
+static void set_rcv_timeout_ms(int fd, long ms)
+{
+    if (ms < 1) ms = 1;
+    struct timeval tv = { .tv_sec  = ms / 1000,
+                          .tv_usec = (ms % 1000) * 1000 };
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+
 static int recv_all(int fd, void *buf, size_t remaining)
 {
     /* Same partial-delivery and EINTR handling as send_all.
      * nread == 0 means the peer closed the connection (EOF). */
     char *cursor = buf;
     while (remaining) {
+        /* Re-derive the read window from the deadline on every iteration, so a
+         * peer feeding us one byte at a time cannot keep resetting a fresh
+         * IO_TIMEOUT_S window forever. */
+        if (g_deadline_active) {
+            long left = deadline_remaining_ms();
+            if (left <= 0) {
+                fprintf(stderr, "rcon: server did not complete its response "
+                                "within %d s — aborting\n", CMD_DEADLINE_S);
+                return -1;
+            }
+            set_rcv_timeout_ms(fd, left < IO_TIMEOUT_S * 1000L
+                                       ? left : IO_TIMEOUT_S * 1000L);
+        }
+
         ssize_t nread = read(fd, cursor, remaining);
         if (nread < 0) {
             if (errno == EINTR) continue;
@@ -133,15 +239,19 @@ static int pkt_send(int fd, int32_t id, int32_t type, const char *payload)
 }
 
 /*
- * Receive one packet. On success, *out_payload is heap-allocated (caller frees).
+ * Receive exactly one packet. On success, *out_payload is heap-allocated and
+ * NUL-terminated (caller frees), and *out_len — if not NULL — receives the
+ * payload's true byte count, which is what reassembly must use because a
+ * payload is arbitrary bytes and may legally contain an embedded NUL.
  * Returns 0 on success, -1 on error.
  *
- * Note: the RCON protocol allows a server to split large responses across
- * multiple packets (each capped at MAX_RESPONSE_PAYLOAD bytes). This function
- * reads exactly one packet; callers that need complete output for long commands
- * (e.g. /list on a large server) would need to reassemble continuation packets.
+ * The RCON protocol lets a server split a large response across several
+ * packets, each payload capped at MAX_RESPONSE_PAYLOAD bytes. Reassembling
+ * those fragments is rcon_exec's job (see the sentinel-packet scheme there);
+ * this function deliberately stays at the single-packet level.
  */
-static int pkt_recv(int fd, int32_t *out_id, int32_t *out_type, char **out_payload)
+static int pkt_recv(int fd, int32_t *out_id, int32_t *out_type,
+                    char **out_payload, size_t *out_len)
 {
     int32_t le_len, le_id, le_type;
 
@@ -179,6 +289,7 @@ static int pkt_recv(int fd, int32_t *out_id, int32_t *out_type, char **out_paylo
     if (recv_all(fd, pad, 2) < 0) { free(payload); return -1; }
 
     *out_payload = payload;
+    if (out_len) *out_len = (size_t)data_len;
     return 0;
 }
 
@@ -268,11 +379,17 @@ static int rcon_auth(int fd, const char *password)
     /* Request ID 1 is an arbitrary correlation tag we chose; the server echoes
      * it back on success. A reply ID of -1 is the protocol's way of signalling
      * that the password was rejected. */
-    if (pkt_send(fd, 1, RCON_AUTH, password) < 0) return -1;
+    if (pkt_send(fd, ID_AUTH, RCON_AUTH, password) < 0) return -1;
 
+    /* The auth exchange gets the same wall-clock budget as a command: it is a
+     * single request/response, but a peer dribbling the reply header a byte at
+     * a time would otherwise stall here before stop.sh's command ever runs. */
     int32_t id, type;
     char *payload;
-    if (pkt_recv(fd, &id, &type, &payload) < 0) return -1;
+    deadline_arm(CMD_DEADLINE_S);
+    int rc = pkt_recv(fd, &id, &type, &payload, NULL);
+    deadline_disarm();
+    if (rc < 0) return -1;
     free(payload);
 
     /* The server echoes the request ID back on success, or replies -1 on failure.
@@ -281,22 +398,133 @@ static int rcon_auth(int fd, const char *password)
         fprintf(stderr, "rcon: authentication failed — check password\n");
         return -1;
     }
-    if (id != 1) {
+    if (id != ID_AUTH) {
         fprintf(stderr, "rcon: unexpected response ID %d during auth\n", id);
         return -1;
     }
     return 0;
 }
 
-/* Send a command and return the server's response (caller frees). NULL on error. */
+/*
+ * Send a command and return the server's complete response as a single
+ * NUL-terminated heap string (caller frees). Returns NULL on error.
+ *
+ * A response longer than MAX_RESPONSE_PAYLOAD (4096) bytes is split by the
+ * server across several packets, and the protocol carries no "this is the last
+ * fragment" flag. Reading just one packet would leave the continuation packets
+ * sitting in the socket buffer, where the *next* command would misread them as
+ * its own reply — every subsequent response in an interactive session would be
+ * shifted by one, which is far worse than plain truncation.
+ *
+ * The standard fix is a sentinel packet: right after the real command we send a
+ * second, empty RCON_EXEC packet carrying a different request id. Servers
+ * process and answer requests strictly in order, so the reply tagged
+ * ID_SENTINEL cannot arrive before the final fragment of the real response.
+ * Everything received up to that point is the command's output; the sentinel's
+ * own reply is discarded and the socket is left correctly positioned for the
+ * next command.
+ */
+static char *rcon_exec_inner(int fd, const char *cmd)
+{
+    if (pkt_send(fd, ID_CMD,      RCON_EXEC, cmd) < 0) return NULL;
+    if (pkt_send(fd, ID_SENTINEL, RCON_EXEC, "")  < 0) return NULL;
+
+    char  *buf = NULL;   /* accumulated payloads; NUL-terminated on success */
+    size_t len = 0;      /* bytes used in buf, excluding the terminator */
+    size_t cap = 0;      /* bytes allocated for buf */
+
+    for (int packets = 0; ; packets++) {
+        if (packets >= MAX_RESPONSE_PKTS) {
+            fprintf(stderr, "rcon: server sent %d packets without terminating "
+                            "the response — aborting\n", MAX_RESPONSE_PKTS);
+            free(buf);
+            return NULL;
+        }
+
+        int32_t id, type;
+        char   *payload;
+        size_t  plen;
+        if (pkt_recv(fd, &id, &type, &payload, &plen) < 0) {
+            free(buf);
+            return NULL;
+        }
+
+        if (id == ID_SENTINEL) {
+            /* End of the real response. Some server implementations answer an
+             * empty or unrecognised exec packet with an error string rather
+             * than an empty payload; whatever it contains, it belongs to the
+             * sentinel and must never reach the user's output. */
+            free(payload);
+            break;
+        }
+
+        if (plen > 0) {
+            /* Enforce the overall cap before growing. Bailing out (rather than
+             * truncating and continuing) is deliberate: we would have to keep
+             * draining to the sentinel to leave the socket usable, and a server
+             * this far out of spec is not one we want to keep talking to. */
+            if (plen > (size_t)MAX_TOTAL_RESPONSE - len) {
+                fprintf(stderr, "rcon: response exceeds %d bytes — aborting\n",
+                        MAX_TOTAL_RESPONSE);
+                free(payload);
+                free(buf);
+                return NULL;
+            }
+
+            size_t needed = len + plen + 1;  /* +1 for the NUL terminator */
+            if (needed > cap) {
+                /* Grow geometrically so a long response costs O(log n)
+                 * reallocs, clamped to the cap so we never over-reserve. */
+                size_t newcap = cap ? cap : 8192;
+                while (newcap < needed) newcap *= 2;
+                if (newcap > (size_t)MAX_TOTAL_RESPONSE + 1)
+                    newcap = (size_t)MAX_TOTAL_RESPONSE + 1;
+
+                /* realloc into a temporary: on failure the original block is
+                 * still valid and must be freed, not leaked. */
+                char *grown = realloc(buf, newcap);
+                if (!grown) {
+                    fprintf(stderr, "rcon: out of memory reassembling response\n");
+                    free(payload);
+                    free(buf);
+                    return NULL;
+                }
+                buf = grown;
+                cap = newcap;
+            }
+
+            memcpy(buf + len, payload, plen);
+            len += plen;
+        }
+
+        free(payload);
+    }
+
+    /* An empty response is legal (many commands reply with nothing). Callers
+     * expect a freeable, printable string either way, so hand back "". */
+    if (!buf) {
+        buf = malloc(1);
+        if (!buf) return NULL;
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
+/*
+ * Public entry point: run one command under a wall-clock budget.
+ *
+ * The deadline is armed per command rather than per process so that an
+ * interactive session gets a fresh budget for each line the user types, while
+ * a single non-interactive invocation (`rcon ... stop`) is guaranteed to
+ * terminate within CMD_DEADLINE_S of starting its exchange. Callers such as
+ * stop.sh depend on that guarantee to stay inside systemd's TimeoutStopSec.
+ */
 static char *rcon_exec(int fd, const char *cmd)
 {
-    if (pkt_send(fd, 2, RCON_EXEC, cmd) < 0) return NULL;
-
-    int32_t id, type;
-    char *payload;
-    if (pkt_recv(fd, &id, &type, &payload) < 0) return NULL;
-    return payload;
+    deadline_arm(CMD_DEADLINE_S);
+    char *resp = rcon_exec_inner(fd, cmd);
+    deadline_disarm();
+    return resp;
 }
 
 /* ── Helpers for main ────────────────────────────────────────────────────── */

@@ -1,9 +1,9 @@
 Package: mc-server
-Version: 0.3.1
+Version: 0.3.2
 Architecture: all
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
-Depends: curl, jq, unzip
-Recommends: rsync, mc-rcon, bash-completion
+Depends: curl, jq, rsync
+Recommends: mc-rcon, unzip, pigz, bash-completion
 Section: admin
 Priority: optional
 Homepage: https://apt.bulmer.dev
@@ -17,4 +17,5 @@ Description: Minecraft server lifecycle manager
  requested Minecraft version, including Mojang's new 26.x versioning scheme.
  .
  RCON is disabled by default. Install mc-rcon to enable the RCON console and
- enable the 'mc rcon' subcommand.
+ enable the 'mc rcon' subcommand. Install unzip for .mrpack modpack support and
+ pigz for parallel backup compression; both are optional.

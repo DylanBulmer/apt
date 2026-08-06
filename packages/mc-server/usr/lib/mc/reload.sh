@@ -3,8 +3,8 @@
 # Reloads datapacks and functions without a full restart.
 set -euo pipefail
 
-CONFIG_FILE="/etc/minecraft/server.conf"
-PASSWD_FILE="/etc/minecraft/server.passwd"
+# shellcheck source=/usr/lib/mc/common.sh
+source /usr/lib/mc/common.sh
 
 if [[ ! -f "$PASSWD_FILE" ]]; then
     echo "[mc] RCON is not enabled. Install mc-rcon to enable systemctl reload." >&2
@@ -16,9 +16,9 @@ if ! command -v rcon >/dev/null 2>&1; then
     exit 1
 fi
 
-SERVER_PORT="25565"
-[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
-RCON_PORT=$((SERVER_PORT + 10))
+load_config
 
-# Pass the password by file so it never appears in argv or a shell variable.
-rcon --password-file "$PASSWD_FILE" 127.0.0.1 "$RCON_PORT" "reload"
+# Unlike stop.sh, this one does NOT swallow stderr: `systemctl reload` is an
+# interactive, operator-initiated action, so a connection or auth failure should
+# be reported rather than silently returning non-zero.
+mc_rcon_call "$MC_RCON_TIMEOUT" reload

@@ -3,7 +3,7 @@ dist/
 staging/
 
 # Compiled binaries inside source tree
-packages/*/src/mcrcon
+packages/*/src/rcon
 
 # reprepro state (generated, not source-controlled)
 repo/db/

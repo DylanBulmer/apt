@@ -26,7 +26,12 @@ case "$_MC_CMD" in
     delete)  cmd_delete       ;;
     help|--help|-h) usage ;;
     *)
-        if declare -f "cmd_${_MC_CMD}" >/dev/null 2>&1; then
+        # Only names a plugin explicitly registered via mc_register_command are
+        # dispatchable. Resolving to a cmd_* function is necessary but NOT
+        # sufficient — otherwise internal helpers (cmd_install_mrpack, ...) would
+        # be callable directly, skipping the require_root/acquire_lock/load_config
+        # their real entry points perform.
+        if mc_is_plugin_command "$_MC_CMD" && declare -f "cmd_${_MC_CMD}" >/dev/null 2>&1; then
             "cmd_${_MC_CMD}" "$@"
         else
             error "Unknown command: $_MC_CMD"
