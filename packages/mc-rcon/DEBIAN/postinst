@@ -50,6 +50,10 @@ case "$1" in
             fi
 
             chown "$MC_USER:$MC_USER" "$PROPS"
+            # This file now holds the RCON password. 0644 (the default from the
+            # umask under which it was created) exposed that secret to every
+            # local user, who could then drive the server console over loopback.
+            chmod 640 "$PROPS"
         fi
 
         # Restart server if it is running so RCON settings take effect

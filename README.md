@@ -77,9 +77,17 @@ only by root and the `minecraft` user).
 > [!WARNING]
 > RCON is an **unencrypted protocol** — the password and all commands travel in
 > plaintext. The `rcon` binary enforces loopback-only connections and will
-> refuse any host that does not resolve to `127.0.0.0/8` or `::1`. For
-> additional defence, keep the RCON port off the network: do not bind it to a
-> public interface or publish it through a firewall (default port `25575`).
+> refuse any host that does not resolve to `127.0.0.0/8` or `::1`.
+>
+> That check binds the **client** only. Minecraft itself has no RCON bind
+> address setting: the server listens on every interface it can, so enabling
+> `mc-rcon` opens port `25575` (game port + 10) to the network. Anyone who
+> reaches that port and has the password gets full console access. **Firewall
+> the RCON port**, e.g.:
+>
+> ```bash
+> sudo ufw deny 25575/tcp
+> ```
 
 ---
 

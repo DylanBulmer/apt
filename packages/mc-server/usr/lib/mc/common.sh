@@ -71,13 +71,23 @@ load_config() {
 # ── Java helpers ───────────────────────────────────────────────────────────────
 
 # Map a Minecraft version to the Java major version it requires.
+#
+# SANITISE BEFORE COMPARING. `[[ "$major" -ge 26 ]]` is an *arithmetic* context:
+# bash evaluates the operand as an expression, and while doing so it performs
+# command substitution inside array subscripts. A value of
+# 'PATH[$(rm -rf /)]' therefore executes the substitution — even under
+# `set -euo pipefail`, because the base variable exists so the nounset check
+# never fires. This function is handed the `minecraft` field of an untrusted
+# .mrpack manifest by cmd_install_mrpack, which runs as root, so any component
+# that is not a plain integer is forced to 0 rather than reaching the
+# comparisons below.
 mc_required_java() {
     local mc_ver="$1"
     local major minor patch
     IFS='.' read -r major minor patch <<< "$mc_ver"
-    major="${major:-0}"
-    minor="${minor:-0}"
-    patch="${patch:-0}"
+    [[ "${major:-}" =~ ^[0-9]+$ ]] || major=0
+    [[ "${minor:-}" =~ ^[0-9]+$ ]] || minor=0
+    [[ "${patch:-}" =~ ^[0-9]+$ ]] || patch=0
 
     # Mojang switched to a new versioning scheme after 1.21.x.
     # Versions 26.x.x and above use the new format and require Java 25.
@@ -133,7 +143,12 @@ find_java_binary() {
 # stock port so callers that have not run load_config still compute something
 # sane rather than failing under `set -u`.
 mc_rcon_port() {
-    echo $(( ${SERVER_PORT:-25565} + 10 ))
+    local port="${SERVER_PORT:-25565}"
+    # Same reasoning as mc_required_java: never let an unvalidated string reach
+    # an arithmetic context. A malformed SERVER_PORT falls back to the stock
+    # port instead of being evaluated as an expression.
+    [[ "$port" =~ ^[0-9]+$ ]] || port=25565
+    echo $(( port + 10 ))
 }
 
 # True when RCON is usable: a password file exists and the client is installed

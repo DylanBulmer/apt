@@ -21,12 +21,32 @@ case "$1" in
                 "$MC_USER"
         fi
 
-        # Create base directories
-        for dir in "$MC_BASE" "$MC_BACKUP"; do
-            mkdir -p "$dir"
-            chown "$MC_USER:$MC_USER" "$dir"
-            chmod 755 "$dir"
-        done
+        # Server data dir: owned by the service account, but NOT world-readable
+        # — server.properties inside it carries the RCON password.
+        mkdir -p "$MC_BASE"
+        chown "$MC_USER:$MC_USER" "$MC_BASE"
+        chmod 750 "$MC_BASE"
+
+        # Backup dir: root-only. Backups are written by root and read only by
+        # root (`mc restore`). It must not be owned or writable by $MC_USER —
+        # that account is the one exposed to untrusted mods and plugins, and
+        # owning this directory would let it (a) pre-create the next predictable
+        # backup filename as a symlink for root's tar to follow, and (b) swap an
+        # archive between `mc restore`'s validation pass and its extraction.
+        mkdir -p "$MC_BACKUP"
+        chown root:root "$MC_BACKUP"
+        chmod 700 "$MC_BACKUP"
+        # Reclaim archives from installs made before this was tightened.
+        find "$MC_BACKUP" -maxdepth 1 -type f -name 'minecraft-*.tar.gz' \
+            -exec chown root:root {} + 2>/dev/null || true
+        find "$MC_BACKUP" -maxdepth 1 -type f -name 'minecraft-*.tar.gz' \
+            -exec chmod 600 {} + 2>/dev/null || true
+
+        # Likewise for an existing server.properties: it was created 0644 by
+        # earlier versions, leaving the RCON password readable by any local user.
+        if [[ -f "$MC_BASE/server.properties" ]]; then
+            chmod 640 "$MC_BASE/server.properties"
+        fi
 
         # Config dir: root-owned, world-readable
         mkdir -p "$MC_CONFIG"

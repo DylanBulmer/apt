@@ -88,6 +88,11 @@ fi
 
 if [[ -z "$SERVER_FLAGS" ]]; then
     ACTUAL_VER=$(java_major_version "$JAVA_BIN" 2>/dev/null || echo "17")
+    # java_major_version parses `java -version` output, so it can hand back
+    # something non-numeric if the runtime formats its banner unexpectedly.
+    # The comparisons below are arithmetic contexts, which evaluate their
+    # operand as an expression — feed them only digits.
+    [[ "$ACTUAL_VER" =~ ^[0-9]+$ ]] || ACTUAL_VER=17
     if   [[ "$ACTUAL_VER" -ge 21 ]]; then
         SERVER_FLAGS="$FLAGS_ZGC"           # Java 21, 25
     elif [[ "$ACTUAL_VER" -ge 17 ]]; then

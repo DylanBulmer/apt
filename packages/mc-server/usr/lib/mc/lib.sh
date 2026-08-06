@@ -61,21 +61,38 @@ mc_is_plugin_command() {
 
 # load_config() is in common.sh — start.sh needs it too.
 
+# Persist the effective configuration to $SERVER_CONF.
+#
+# EVERY VALUE IS WRITTEN THROUGH %q. load_config() *sources* this file as root,
+# so an unquoted value is a code-execution sink: a MINECRAFT_VERSION containing
+# a newline used to append its own line to the file, and one containing $(...)
+# had it run on the next `mc` invocation. Values reaching here are validated at
+# their entry points, but this file is the last line of defence and the one that
+# turns a one-shot parsing slip into persistent root execution — %q makes the
+# output shell-safe regardless of what the value contains.
 write_config() {
-    mkdir -p "$MC_CONFIG"
-    cat > "$SERVER_CONF" <<EOF
-# mc server configuration
-SERVER_TYPE=${SERVER_TYPE}
-MINECRAFT_VERSION=${MINECRAFT_VERSION}
-JAVA_VERSION=${JAVA_VERSION}
-SERVER_RAM=${SERVER_RAM}
-SERVER_PORT=${SERVER_PORT}
-BACKUP_KEEP=${BACKUP_KEEP}
-BACKUP_SCHEDULE=${BACKUP_SCHEDULE}
-JAVA_OPTS="${JAVA_OPTS}"
-EOF
+    # BACKUP_SCHEDULE is interpolated into a systemd unit drop-in below, where
+    # %q is no help — that file is unit syntax, not shell. Require a single line
+    # so it cannot append arbitrary directives to a unit that runs as root.
+    # Checked up front so a bad value aborts before anything is written.
+    if [[ "$BACKUP_SCHEDULE" == *$'\n'* || "$BACKUP_SCHEDULE" == *$'\r'* ]]; then
+        die "Invalid BACKUP_SCHEDULE: must be a single line of systemd OnCalendar= syntax."
+    fi
 
-    # Regenerate backup timer drop-in so daemon-reload picks up schedule changes
+    mkdir -p "$MC_CONFIG"
+    {
+        echo "# mc server configuration"
+        printf 'SERVER_TYPE=%q\n'       "$SERVER_TYPE"
+        printf 'MINECRAFT_VERSION=%q\n' "$MINECRAFT_VERSION"
+        printf 'JAVA_VERSION=%q\n'      "$JAVA_VERSION"
+        printf 'SERVER_RAM=%q\n'        "$SERVER_RAM"
+        printf 'SERVER_PORT=%q\n'       "$SERVER_PORT"
+        printf 'BACKUP_KEEP=%q\n'       "$BACKUP_KEEP"
+        printf 'BACKUP_SCHEDULE=%q\n'   "$BACKUP_SCHEDULE"
+        printf 'JAVA_OPTS=%q\n'         "$JAVA_OPTS"
+    } > "$SERVER_CONF"
+
+    # Regenerate backup timer drop-in so daemon-reload picks up schedule changes.
     local dropin_dir="/etc/systemd/system/minecraft-backup.timer.d"
     if [[ -d /etc/systemd/system ]]; then
         mkdir -p "$dropin_dir"
@@ -153,23 +170,83 @@ cleanup_unregister_dir() {
 
 # ── Process lock ───────────────────────────────────────────────────────────────
 
+# Take the exclusive mc lock, or die trying.
+#
+# RE-ENTRANT. cmd_upgrade holds the lock and then calls cmd_backup, which takes
+# it too; a second acquisition from the same process is a no-op rather than a
+# self-deadlock. That is what lets cmd_backup lock at all — without it, the
+# minecraft-backup.timer could tar /opt/minecraft midway through an install or,
+# worse, while cmd_restore was emptying the directory, and the BACKUP_KEEP
+# rotation would then prune a good archive in favour of the truncated one.
 acquire_lock() {
+    [[ "$_MC_CLEANUP_LOCK" == "$LOCK_FILE" ]] && return 0
+
     mkdir -p "$(dirname "$LOCK_FILE")"
 
-    if [[ -f "$LOCK_FILE" ]]; then
-        local held_pid held_cmd
-        held_pid=$(sed -n '1p' "$LOCK_FILE" 2>/dev/null)
-        held_cmd=$(sed -n '2p' "$LOCK_FILE" 2>/dev/null)
+    local attempt held_pid held_cmd
+    for attempt in 1 2; do
+        # Create-or-fail in a single syscall (noclobber ⇒ O_EXCL). The previous
+        # `[[ -f ]]` test followed by a separate write was a TOCTOU: two runs
+        # starting together could both see no lock and both proceed.
+        if (set -o noclobber
+            printf '%s\n%s\n' "$$" "${_MC_CMD:-unknown}" > "$LOCK_FILE") 2>/dev/null
+        then
+            _MC_CLEANUP_LOCK="$LOCK_FILE"
+            mc_cleanup_arm
+            return 0
+        fi
+
+        # Creation failed, so the file exists: either a live holder, or a lock
+        # left behind by a run that was killed before its EXIT trap fired.
+        held_pid=$(sed -n '1p' "$LOCK_FILE" 2>/dev/null || true)
+        held_cmd=$(sed -n '2p' "$LOCK_FILE" 2>/dev/null || true)
+
+        # NOTE: a recycled PID can make a stale lock look live, which costs a
+        # spurious "already running" refusal. That is the safe direction to err
+        # in — probing harder (e.g. matching /proc/<pid>/cmdline) risks the
+        # opposite mistake, deleting a lock that is genuinely held.
         if [[ -n "$held_pid" ]] && kill -0 "$held_pid" 2>/dev/null; then
             die "Another mc operation is already running: PID $held_pid ($held_cmd). Try again later."
-        else
-            warn "Removing stale lock from PID ${held_pid:-?} (${held_cmd:-unknown})"
         fi
+
+        [[ "$attempt" -eq 1 ]] || break
+        warn "Removing stale lock from PID ${held_pid:-?} (${held_cmd:-unknown})"
+        rm -f "$LOCK_FILE"
+    done
+
+    die "Could not acquire lock $LOCK_FILE."
+}
+
+# ── Java provisioning ──────────────────────────────────────────────────────────
+
+# Ensure a JRE for the given major version is available, installing it via apt
+# if missing. Interactive callers (a terminal attached, no --yes) are prompted
+# for confirmation; non-interactive callers (Docker entrypoint, --yes) install
+# without asking.
+#
+# Lives here rather than in common.sh: it needs info()/die() and runs apt, so it
+# is root-only and has no business being loaded by the unprivileged
+# systemd-facing scripts. (The Java *lookup* helpers it builds on are shared and
+# do live in common.sh.)
+ensure_java() {
+    # assume_yes is passed down by the caller, not parsed here; ${2:-no} is just a fallback.
+    local required="$1" assume_yes="${2:-no}"
+    find_java_binary "$required" &>/dev/null && return 0
+
+    local pkg="openjdk-${required}-jre-headless"
+
+    if [[ "$assume_yes" != "yes" ]]; then
+        if [[ ! -t 0 ]]; then
+            die "Java ${required} is required but not installed. Re-run with --yes, or install manually: apt install ${pkg}"
+        fi
+        local confirm
+        read -rp "Minecraft requires Java ${required}, which isn't installed. Install ${pkg} now? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || die "Java ${required} is required. Install manually: apt install ${pkg}"
     fi
 
-    printf '%s\n%s\n' "$$" "${_MC_CMD:-unknown}" > "$LOCK_FILE"
-    _MC_CLEANUP_LOCK="$LOCK_FILE"
-    mc_cleanup_arm
+    info "Installing ${pkg}..."
+    apt-get update -qq && apt-get install -y --no-install-recommends "$pkg" \
+        || die "Failed to install ${pkg}. Install manually: apt install ${pkg}"
 }
 
 # ── Systemd helpers ────────────────────────────────────────────────────────────
@@ -201,53 +278,130 @@ rcon_command() {
 
 # ── server.properties helpers ──────────────────────────────────────────────────
 
+# server.properties holds the RCON password, so it must never be world-readable.
+# It is owned by (and rewritten by) the JVM's own user, so 0640 is the tightest
+# mode that still lets the server read and write it.
+SPROP_MODE=640
+
 # Set or replace a key=value in server.properties. Creates the file if absent.
+#
+# Rewritten in-shell rather than with `sed -i "s|^${key}=.*|${key}=${value}|"`:
+# the replacement text was interpolated unescaped, so a value containing the '|'
+# delimiter closed the s/// command and the rest was parsed as sed syntax — a
+# value of 'x|w /etc/cron.d/pwn|' turned into a sed write-file command executing
+# as root. Values here can originate from a pack-supplied server.properties, so
+# they are not trusted input.
 sprop_set() {
     local key="$1" value="$2"
     local file="$MC_BASE/server.properties"
-    if grep -q "^${key}=" "$file" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
-    else
-        echo "${key}=${value}" >> "$file"
+
+    if [[ ! -f "$file" ]]; then
+        printf '%s=%s\n' "$key" "$value" > "$file"
+        chmod "$SPROP_MODE" "$file"
+        return 0
     fi
+
+    local tmp found="no" line
+    tmp=$(mktemp "${file}.XXXXXX")
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "${key}="* ]]; then
+            # Collapse duplicate definitions of the same key onto the first.
+            [[ "$found" == "yes" ]] && continue
+            printf '%s=%s\n' "$key" "$value"
+            found="yes"
+        else
+            printf '%s\n' "$line"
+        fi
+    done < "$file" > "$tmp"
+
+    [[ "$found" == "yes" ]] || printf '%s=%s\n' "$key" "$value" >> "$tmp"
+
+    # mktemp gives 0600 root:root; carry over the real file's mode and owner so
+    # the JVM can still read its own config after the swap.
+    chown --reference="$file" "$tmp" 2>/dev/null || true
+    chmod --reference="$file" "$tmp" 2>/dev/null || chmod "$SPROP_MODE" "$tmp"
+    mv -f "$tmp" "$file"
 }
 
 sprop_get() {
     local key="$1"
-    grep "^${key}=" "$MC_BASE/server.properties" 2>/dev/null | cut -d= -f2-
+    # The keys we manage contain '.' (rcon.port, rcon.password), which grep
+    # would otherwise treat as "any character".
+    grep -m1 -- "^${key//./\\.}=" "$MC_BASE/server.properties" 2>/dev/null | cut -d= -f2-
+}
+
+# Keys the system owns. A pack override never gets to set these.
+MC_MANAGED_PROPS=(server-port enable-rcon rcon.port rcon.password)
+
+# The value the system wants for a managed key: whatever the live
+# server.properties already says, or — when there is no live file yet — the
+# correct value derived from config and from whether mc-rcon has provisioned a
+# password. Always succeeds; an unknown key yields the empty string.
+managed_property_value() {
+    local key="$1" current=""
+
+    if [[ -f "$MC_BASE/server.properties" ]]; then
+        current=$(sprop_get "$key")
+        if [[ -n "$current" ]]; then
+            printf '%s' "$current"
+            return 0
+        fi
+    fi
+
+    case "$key" in
+        server-port) printf '%s' "${SERVER_PORT:-25565}" ;;
+        rcon.port)   printf '%s' "$(mc_rcon_port)" ;;
+        enable-rcon)
+            # RCON is on only when mc-rcon has generated a password.
+            if [[ -f "$PASSWD_FILE" ]]; then printf 'true'; else printf 'false'; fi ;;
+        rcon.password)
+            if [[ -f "$PASSWD_FILE" ]]; then printf '%s' "$(cat "$PASSWD_FILE")"; fi ;;
+    esac
+    return 0
 }
 
 # Merge an override server.properties into the live one, protecting system-managed keys.
+#
+# This runs even when there is NO existing server.properties. It used to be
+# gated on one existing, which meant a first-time `mc install pack.mrpack`
+# rsynced the pack's own server.properties into place verbatim — letting the
+# pack set enable-rcon=true with a password of its choosing, and vanilla binds
+# RCON to every interface. The managed keys are now always re-applied.
 merge_server_properties() {
     local override="$1"
     local dest="$MC_BASE/server.properties"
     [[ -f "$override" ]] || return 0
 
-    # Keys the system owns — never overwritten by pack overrides
-    local -a protected=(server-port enable-rcon rcon.port rcon.password)
-    declare -A saved
-    for key in "${protected[@]}"; do
-        saved["$key"]=$(sprop_get "$key")
+    # Resolve before the copy: resolution reads the file about to be replaced.
+    # An indexed array parallel to MC_MANAGED_PROPS rather than an associative
+    # one — `declare -A` requires bash 4 and nothing else in the toolchain does.
+    local -a saved=()
+    local i
+    for (( i=0; i<${#MC_MANAGED_PROPS[@]}; i++ )); do
+        saved[i]=$(managed_property_value "${MC_MANAGED_PROPS[i]}")
     done
 
     cp "$override" "$dest"
+    chmod "$SPROP_MODE" "$dest"
 
-    for key in "${protected[@]}"; do
-        local val="${saved[$key]}"
-        [[ -n "$val" ]] && sprop_set "$key" "$val"
+    # Written unconditionally, empty values included: skipping empties (as this
+    # once did) would leave a pack-supplied rcon.password in place.
+    for (( i=0; i<${#MC_MANAGED_PROPS[@]}; i++ )); do
+        sprop_set "${MC_MANAGED_PROPS[i]}" "${saved[i]}"
     done
 }
 
 # Write the initial server.properties (RCON off by default).
 init_server_properties() {
     load_config
-    local rcon_port=$((SERVER_PORT + 10))
     cat > "$MC_BASE/server.properties" <<EOF
 server-port=${SERVER_PORT}
 enable-rcon=false
-rcon.port=${rcon_port}
+rcon.port=$(mc_rcon_port)
 rcon.password=
 EOF
+    chmod "$SPROP_MODE" "$MC_BASE/server.properties"
     echo "eula=true" > "$MC_BASE/eula.txt"
 }
 
@@ -498,6 +652,33 @@ mrpack_safe_path() {
     return 0
 }
 
+# Extract one override tree ("overrides" or "server-overrides") out of the pack
+# and merge it into the staging dir.
+#
+# unzip exits 11 when the archive simply contains no matching entries, which is
+# the normal case — most packs ship only one of the two trees. Every other
+# non-zero status is a real failure and now aborts: the previous `|| true`
+# swallowed them all, so a truncated or hostile archive that unzip refused
+# midway through left a half-extracted tree that was merged anyway.
+mrpack_extract_overrides() {
+    local mrpack_file="$1" staging="$2" subdir="$3"
+    local outdir="${staging}/_ov_${subdir}" rc=0
+
+    unzip -q -o -d "$outdir" "$mrpack_file" "${subdir}/*" 2>/dev/null || rc=$?
+    if [[ "$rc" -ne 0 && "$rc" -ne 11 ]]; then
+        die "Failed to extract ${subdir}/ from $(basename "$mrpack_file") (unzip exit ${rc})."
+    fi
+
+    if [[ -d "${outdir}/${subdir}" ]]; then
+        # Strip any symlinks the pack embedded before merging: a link pointing
+        # outside the tree (e.g. -> /etc) would otherwise be copied into MC_BASE
+        # and could later be written through. Legitimate packs ship plain files.
+        find "${outdir}/${subdir}" -type l -delete
+        rsync -a "${outdir}/${subdir}/" "${staging}/"
+    fi
+    rm -rf "$outdir"
+}
+
 # ── mrpack installation ────────────────────────────────────────────────────────
 
 cmd_install_mrpack() {
@@ -532,6 +713,16 @@ cmd_install_mrpack() {
 
     # ── Resolve version and server type ───────────────────────────────────────
     MINECRAFT_VERSION=$(echo "$manifest" | jq -r '.dependencies.minecraft')
+
+    # VALIDATE IMMEDIATELY, before this value is used for anything at all.
+    # It used to be checked only much later, inside download_jar — but it
+    # reaches mc_required_java (an arithmetic context, and so a code-execution
+    # sink) a few lines below, and on the NeoForge branch it never reached
+    # download_jar at all and went straight into write_config's output. Both
+    # sinks are hardened in their own right; this is the check that keeps a
+    # hostile value out of them in the first place.
+    validate_version "$MINECRAFT_VERSION" "Minecraft version"
+
     local nf_version=""
 
     if echo "$manifest" | jq -e '.dependencies["fabric-loader"]' >/dev/null 2>&1; then
@@ -650,39 +841,20 @@ cmd_install_mrpack() {
     fi
 
     # ── Extract overrides (server-overrides/ takes precedence) ────────────────
-    # Extract overrides/ first, then server-overrides/ on top.
-    # Strip any symlinks the pack embedded in its overrides before merging them:
-    # a symlink pointing outside the tree (e.g. -> /etc) would otherwise be copied
-    # into MC_BASE and could later be written through. Legitimate packs ship plain
-    # files, not links.
-    # The `unzip -l | grep` probes are gone: they re-read the whole archive just
-    # to decide whether to re-read it again. Attempting the extraction and then
-    # testing for the resulting directory is equivalent and halves the reads.
-    unzip -q -o -d "${staging}/_ov" "$mrpack_file" "overrides/*" 2>/dev/null || true
-    if [[ -d "${staging}/_ov/overrides" ]]; then
-        find "${staging}/_ov/overrides" -type l -delete
-        rsync -a "${staging}/_ov/overrides/" "${staging}/"
-    fi
-    rm -rf "${staging}/_ov"
-
-    unzip -q -o -d "${staging}/_sov" "$mrpack_file" "server-overrides/*" 2>/dev/null || true
-    if [[ -d "${staging}/_sov/server-overrides" ]]; then
-        find "${staging}/_sov/server-overrides" -type l -delete
-        rsync -a "${staging}/_sov/server-overrides/" "${staging}/"
-    fi
-    rm -rf "${staging}/_sov"
+    # overrides/ first, then server-overrides/ on top.
+    mrpack_extract_overrides "$mrpack_file" "$staging" "overrides"
+    mrpack_extract_overrides "$mrpack_file" "$staging" "server-overrides"
 
     # ── Commit to server directory (atomic rename) ────────────────────────────
     mkdir -p "$MC_BASE"
 
     # Merge server.properties if the pack provided one, protecting system keys.
+    # Note there is no "only if one already exists" gate here any more — see
+    # merge_server_properties. Removing the pack's copy from staging keeps the
+    # rsync below from putting it back.
     if [[ -f "${staging}/server.properties" ]]; then
-        if [[ -f "$MC_BASE/server.properties" ]]; then
-            merge_server_properties "${staging}/server.properties"
-            rm -f "${staging}/server.properties"
-        fi
-        # If no existing server.properties, init_server_properties will create
-        # one after the rsync below.
+        merge_server_properties "${staging}/server.properties"
+        rm -f "${staging}/server.properties"
     fi
 
     rsync -a "${staging}/" "${MC_BASE}/"
@@ -907,6 +1079,11 @@ cmd_status() {
 cmd_backup() {
     require_root
     require_server
+    # Serialise against install/upgrade/restore. acquire_lock is re-entrant, so
+    # cmd_upgrade calling us while it holds the lock is fine; a concurrent
+    # minecraft-backup.timer firing during an install is refused, which is the
+    # right outcome — the next timer run picks it up.
+    acquire_lock
     load_config
 
     local timestamp backup_file base_name parent_dir
@@ -972,13 +1149,19 @@ cmd_backup() {
         rcon_command "say [mc] Backup complete" 2>/dev/null || true
     fi
 
-    if [[ "${BACKUP_KEEP:-7}" -gt 0 ]]; then
+    local keep="${BACKUP_KEEP:-7}"
+    [[ "$keep" =~ ^[0-9]+$ ]] || keep=7   # never evaluate an unvalidated string
+    if [[ "$keep" -gt 0 ]]; then
         ls -1t "${MC_BACKUP}/minecraft-"*.tar.gz 2>/dev/null \
-            | tail -n +"$((BACKUP_KEEP + 1))" \
+            | tail -n +"$((keep + 1))" \
             | xargs -r rm --
     fi
 
-    chown "$MC_USER:$MC_USER" "$backup_file"
+    # Deliberately NOT chowned to $MC_USER. Backups are written by root and read
+    # only by root (`mc restore`); handing them to the account that runs
+    # untrusted mods would let a compromised server rewrite the archive that a
+    # later restore extracts as root. $MC_BACKUP is root-owned 0700 to match.
+    chmod 600 "$backup_file"
     info "Backup complete: $backup_file"
 }
 
@@ -1003,6 +1186,24 @@ cmd_restore() {
     local listing
     listing=$(tar -tzf "$archive" 2>/dev/null) \
         || die "Failed to read archive (not a valid .tar.gz?): $archive"
+
+    # Entry TYPES matter as much as entry names, and a second listing pass is
+    # the price of checking them: `tar -t` prints only the member name, so the
+    # loop below cannot see a hardlink's target. An entry named
+    # 'minecraft/passwd' hardlinked to /etc/shadow satisfies every name check,
+    # and the `chown -R` at the end of this function then hands that inode to
+    # the minecraft user. Extraction runs as root, which is exempt from
+    # fs.protected_hardlinks, so the kernel does not stop it either.
+    #
+    # `tar -tv` prints the entry type as the first character of the mode column:
+    # '-' regular, 'd' directory, 'l' symlink, 'h' hardlink, and s/p/b/c for
+    # sockets, FIFOs and device nodes. Only the first two are accepted; a real
+    # backup of a server directory contains nothing else.
+    local bad_entries
+    bad_entries=$(tar -tvzf "$archive" 2>/dev/null | grep -v '^[-d]' | head -n 5) || true
+    if [[ -n "$bad_entries" ]]; then
+        die "Refusing archive containing links or special files:\n${bad_entries}"
+    fi
 
     local base_name member
     base_name=$(basename "$MC_BASE")
