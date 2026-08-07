@@ -340,6 +340,25 @@ rcon_command() {
 # mode that still lets the server read and write it.
 SPROP_MODE=640
 
+# Apply the intended owner AND mode to server.properties.
+#
+# The mode alone is not enough. 0640 is readable only because the *owner* is
+# $MC_USER; every writer in this file runs as root, so a file that is created
+# and then merely chmod'ed ends up 0640 root:root — which the JVM can neither
+# read nor write. That failure is near-silent: the server logs a stack trace
+# and "Failed to store properties", then falls back to its compiled-in defaults
+# (stock port, level-name "world", RCON off), so a server that looks like it
+# started fine is running a configuration nobody chose — and, if level-name was
+# customised, generating a brand-new empty world beside the real one.
+#
+# chown tolerates failure so the helper is safe to call from any context; the
+# mc commands that reach it already require root.
+sprop_secure() {
+    local file="${1:-$MC_BASE/server.properties}"
+    chown "$MC_USER:$MC_USER" "$file" 2>/dev/null || true
+    chmod "$SPROP_MODE" "$file"
+}
+
 # Set or replace a key=value in server.properties. Creates the file if absent.
 #
 # Rewritten in-shell rather than with `sed -i "s|^${key}=.*|${key}=${value}|"`:
@@ -354,7 +373,7 @@ sprop_set() {
 
     if [[ ! -f "$file" ]]; then
         printf '%s=%s\n' "$key" "$value" > "$file"
-        chmod "$SPROP_MODE" "$file"
+        sprop_secure "$file"
         return 0
     fi
 
@@ -439,8 +458,11 @@ merge_server_properties() {
         saved[i]=$(managed_property_value "${MC_MANAGED_PROPS[i]}")
     done
 
+    # Secure before the sprop_set loop below: those calls carry the mode and
+    # owner across their temp-file swap with --reference, so $dest has to be
+    # correct first or the pack's ownership would be propagated forward.
     cp "$override" "$dest"
-    chmod "$SPROP_MODE" "$dest"
+    sprop_secure "$dest"
 
     # Written unconditionally, empty values included: skipping empties (as this
     # once did) would leave a pack-supplied rcon.password in place.
@@ -461,7 +483,7 @@ enable-rcon=false
 rcon.port=$(mc_rcon_port)
 rcon.password=
 EOF
-    chmod "$SPROP_MODE" "$MC_BASE/server.properties"
+    sprop_secure
 }
 
 # ── Download helpers ───────────────────────────────────────────────────────────
@@ -1083,12 +1105,17 @@ cmd_install() {
     fi
 
     JAVA_VERSION=$(mc_required_java "$MINECRAFT_VERSION")
-    chown -R "$MC_USER:$MC_USER" "$MC_BASE"
     write_config
 
     if [[ ! -f "$MC_BASE/server.properties" ]]; then
         init_server_properties
     fi
+
+    # Last, as in cmd_install_mrpack: this ran BEFORE init_server_properties,
+    # so the file that call creates was left root-owned and the server came up
+    # on defaults. sprop_secure() now covers that file specifically; the order
+    # here is what keeps every *other* root-created file correct too.
+    chown -R "$MC_USER:$MC_USER" "$MC_BASE"
 
     if [[ "$_MC_TIMER_DROPIN_CHANGED" == "yes" ]]; then
         systemctl daemon-reload 2>/dev/null || true

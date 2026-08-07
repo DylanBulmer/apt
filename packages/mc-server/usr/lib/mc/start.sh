@@ -91,6 +91,29 @@ if ! eula_accepted; then
     exit 1
 fi
 
+# ── server.properties access gate ──────────────────────────────────────────────
+#
+# The JVM treats an unreadable server.properties as an absent one: it logs a
+# stack trace, reports "Failed to store properties to file", and then carries on
+# with its compiled-in defaults — stock port, RCON off, level-name "world". The
+# server appears to start normally while ignoring every setting the operator
+# configured, and if level-name was customised it generates a new empty world
+# next to the real one. Fail here instead, where the reason is legible.
+#
+# The usual cause is a root-owned file: 0640 is readable only because the owner
+# is the service account, and editing it as root with an editor that writes and
+# renames (sed -i, some vim configs) replaces it with a root-owned inode.
+#
+# An absent file is fine — that is a first boot, and the server writes its own.
+_MC_SPROPS="${SERVER_DIR}/server.properties"
+if [[ -e "$_MC_SPROPS" ]] && { [[ ! -r "$_MC_SPROPS" ]] || [[ ! -w "$_MC_SPROPS" ]]; }; then
+    echo "ERROR: ${_MC_SPROPS} is not readable and writable by $(id -un)." >&2
+    echo "       The server would silently start on default settings." >&2
+    echo "       Fix with: chown ${MC_USER}:${MC_USER} ${_MC_SPROPS} && chmod 640 ${_MC_SPROPS}" >&2
+    exit 1
+fi
+unset _MC_SPROPS
+
 # ── Resolve Java binary ────────────────────────────────────────────────────────
 
 JAVA_BIN="java"

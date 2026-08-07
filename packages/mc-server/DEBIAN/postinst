@@ -44,7 +44,17 @@ case "$1" in
 
         # Likewise for an existing server.properties: it was created 0644 by
         # earlier versions, leaving the RCON password readable by any local user.
+        #
+        # The chown repairs a second, louder breakage. `mc install` used to
+        # chown the server directory before writing this file, so the file was
+        # left root-owned — 0640 root:root, which the JVM (running as $MC_USER)
+        # can neither read nor write. Such a server starts on compiled-in
+        # defaults instead of its own config. Editing the file by hand as root
+        # with a write-and-rename editor (sed -i, some vim configs) reproduces
+        # exactly the same state, so this runs on every configure, not just on
+        # upgrades from the affected versions.
         if [[ -f "$MC_BASE/server.properties" ]]; then
+            chown "$MC_USER:$MC_USER" "$MC_BASE/server.properties"
             chmod 640 "$MC_BASE/server.properties"
         fi
 
