@@ -137,6 +137,22 @@ find_java_binary() {
     return 1
 }
 
+# ── EULA ───────────────────────────────────────────────────────────────────────
+
+# True when eula.txt records acceptance of the Minecraft EULA.
+#
+# Shared with start.sh, which gates the launch on it — hence its home here
+# rather than in lib.sh. Mojang's own file is a comment header followed by
+# `eula=true`, and operators edit it by hand, so tolerate surrounding
+# whitespace and TRUE/True. Anything else (absent file, eula=false, a value
+# commented out) is a refusal: this decides whether a licence was accepted, so
+# it fails closed.
+eula_accepted() {
+    local file="${1:-$MC_BASE/eula.txt}"
+    [[ -f "$file" ]] || return 1
+    grep -qiE '^[[:space:]]*eula[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$file"
+}
+
 # ── RCON ───────────────────────────────────────────────────────────────────────
 
 # RCON listens on the game port + 10 (25575 by default). Falls back to the

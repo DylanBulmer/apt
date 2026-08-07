@@ -34,8 +34,11 @@ _mc() {
                     return
                     ;;
             esac
-            COMPREPLY=( $(compgen -W "--type --version --yes -y" -- "$cur")
+            COMPREPLY=( $(compgen -W "--type --version --accept-eula --yes -y --force" -- "$cur")
                         $(compgen -f -X '!*.mrpack' -- "$cur") )
+            ;;
+        start|restart)
+            COMPREPLY=( $(compgen -W "--accept-eula" -- "$cur") )
             ;;
         restore)
             local backups=()

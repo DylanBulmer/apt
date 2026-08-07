@@ -1,5 +1,5 @@
 Package: mc-server
-Version: 0.3.3
+Version: 0.5.0
 Architecture: all
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
 Depends: curl, jq, rsync
@@ -19,3 +19,7 @@ Description: Minecraft server lifecycle manager
  RCON is disabled by default. Install mc-rcon to enable the RCON console and
  enable the 'mc rcon' subcommand. Install unzip for .mrpack modpack support and
  pigz for parallel backup compression; both are optional.
+ .
+ Installing a server requires accepting the Minecraft EULA, either interactively
+ or with 'mc install --accept-eula'. The server will not start until it has been
+ accepted.

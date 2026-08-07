@@ -20,9 +20,14 @@ require_root() {
     [[ $EUID -eq 0 ]] || die "This command must be run as root."
 }
 
+# True when a server is present. NeoForge installs a run.sh instead of a
+# plain server.jar, so both count.
+server_installed() {
+    [[ -f "$MC_BASE/server.jar" || -f "$MC_BASE/run.sh" ]]
+}
+
 require_server() {
-    [[ -f "$MC_BASE/server.jar" || -f "$MC_BASE/run.sh" ]] \
-        || die "No server installed. Run: mc install"
+    server_installed || die "No server installed. Run: mc install"
 }
 
 # ── Plugin command registry ────────────────────────────────────────────────────
@@ -70,6 +75,10 @@ mc_is_plugin_command() {
 # their entry points, but this file is the last line of defence and the one that
 # turns a one-shot parsing slip into persistent root execution — %q makes the
 # output shell-safe regardless of what the value contains.
+# Set by write_config: "yes" when it rewrote the backup timer drop-in, so
+# callers can skip a daemon-reload that would reload nothing.
+_MC_TIMER_DROPIN_CHANGED="no"
+
 write_config() {
     # BACKUP_SCHEDULE is interpolated into a systemd unit drop-in below, where
     # %q is no help — that file is unit syntax, not shell. Require a single line
@@ -94,13 +103,19 @@ write_config() {
 
     # Regenerate backup timer drop-in so daemon-reload picks up schedule changes.
     local dropin_dir="/etc/systemd/system/minecraft-backup.timer.d"
+    local dropin="${dropin_dir}/schedule.conf"
+    _MC_TIMER_DROPIN_CHANGED="no"
     if [[ -d /etc/systemd/system ]]; then
-        mkdir -p "$dropin_dir"
-        cat > "${dropin_dir}/schedule.conf" <<EOF
-[Timer]
-OnCalendar=
-OnCalendar=${BACKUP_SCHEDULE}
-EOF
+        local desired
+        desired=$(printf '[Timer]\nOnCalendar=\nOnCalendar=%s' "$BACKUP_SCHEDULE")
+        # Write only when the schedule actually moved. Rewriting identical
+        # content still bumps mtime and obliges the caller to daemon-reload for
+        # a change that was not made.
+        if [[ ! -f "$dropin" || "$(cat "$dropin")" != "$desired" ]]; then
+            mkdir -p "$dropin_dir"
+            printf '%s\n' "$desired" > "$dropin"
+            _MC_TIMER_DROPIN_CHANGED="yes"
+        fi
     fi
 }
 
@@ -249,6 +264,48 @@ ensure_java() {
         || die "Failed to install ${pkg}. Install manually: apt install ${pkg}"
 }
 
+# ── EULA ───────────────────────────────────────────────────────────────────────
+
+# Record acceptance of the Minecraft EULA in $MC_BASE/eula.txt.
+#
+# Writing `eula=true` accepts a licence agreement on the operator's behalf, so
+# it is never implicit. Earlier versions wrote it from init_server_properties()
+# as a side effect of installing, which meant nobody was ever asked. Consent now
+# comes from exactly one of two places: --accept-eula, or an interactive yes.
+#
+# Deliberately separate from ensure_java's --yes. That flag consents to
+# installing a package; this one consents to a licence. Folding them together
+# would let someone accept a legal agreement by asking for a JRE.
+#
+# No-ops when the EULA is already accepted, so reinstalls and upgrades of an
+# existing server never re-prompt.
+accept_eula() {
+    local accepted="${1:-no}"
+
+    eula_accepted && return 0
+
+    if [[ "$accepted" != "yes" ]]; then
+        # Non-interactive with no flag: refuse rather than assume consent.
+        if [[ ! -t 0 ]]; then
+            die "The Minecraft EULA has not been accepted. Re-run with --accept-eula to accept it (https://www.minecraft.net/eula)."
+        fi
+        echo "Minecraft's End User Licence Agreement must be accepted before the server"
+        echo "can run: https://www.minecraft.net/eula"
+        local confirm
+        read -rp "Do you accept the Minecraft EULA? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] \
+            || die "The Minecraft EULA was not accepted; nothing was installed."
+    fi
+
+    mkdir -p "$MC_BASE"
+    cat > "$MC_BASE/eula.txt" <<EOF
+# Accepted through mc on $(date -u +%Y-%m-%dT%H:%M:%SZ).
+# https://www.minecraft.net/eula
+eula=true
+EOF
+    chown "$MC_USER:$MC_USER" "$MC_BASE/eula.txt" 2>/dev/null || true
+}
+
 # ── Systemd helpers ────────────────────────────────────────────────────────────
 
 is_running() {
@@ -393,6 +450,9 @@ merge_server_properties() {
 }
 
 # Write the initial server.properties (RCON off by default).
+#
+# Does NOT touch eula.txt — that is accept_eula()'s job, gated on --accept-eula
+# or an interactive prompt, and runs before any of this.
 init_server_properties() {
     load_config
     cat > "$MC_BASE/server.properties" <<EOF
@@ -402,7 +462,6 @@ rcon.port=$(mc_rcon_port)
 rcon.password=
 EOF
     chmod "$SPROP_MODE" "$MC_BASE/server.properties"
-    echo "eula=true" > "$MC_BASE/eula.txt"
 }
 
 # ── Download helpers ───────────────────────────────────────────────────────────
@@ -581,6 +640,54 @@ install_neoforge() {
     touch "${server_dir}/.neoforge"
 
     RESOLVED_VERSION="$nf_version"
+}
+
+# Resolve "latest" to a concrete version WITHOUT downloading anything.
+#
+# Exists so cmd_upgrade can tell that an upgrade is a no-op *before* paying for
+# a backup and the downtime of a stop. Mirrors the resolution each download_*
+# function already does internally; those keep doing it for themselves, since
+# cmd_install calls them directly.
+#
+# Prints the resolved version, or nothing if it could not be determined. A
+# failure here is deliberately not fatal: callers fall through to the real
+# download, which reports the network error properly.
+resolve_version() {
+    local type="$1" version="$2"
+
+    if [[ "$version" != "latest" ]]; then
+        echo "$version"
+        return 0
+    fi
+
+    case "$type" in
+        paper)
+            curl -sf "https://api.papermc.io/v2/projects/paper" 2>/dev/null \
+                | jq -r '.versions[-1] // empty' 2>/dev/null ;;
+        vanilla|fabric)
+            curl -sf "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" 2>/dev/null \
+                | jq -r '.latest.release // empty' 2>/dev/null ;;
+        neoforge)
+            curl -sf "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml" 2>/dev/null \
+                | grep '<latest>' \
+                | sed 's|.*<latest>\(.*\)</latest>.*|\1|' ;;
+        *) return 1 ;;
+    esac
+}
+
+# True when re-running an upgrade at the same version would be a genuine no-op.
+#
+# Only for server types whose artifact is fully determined by the version
+# string. Paper publishes new *builds* against an unchanged Minecraft version,
+# and Fabric ships new *loader* versions the same way — for those two,
+# "same version" does not mean "same jar", and skipping would quietly pin the
+# server to a stale build. server.conf records only the Minecraft version, so
+# there is nothing cheaper to compare against for them.
+version_identifies_artifact() {
+    case "$1" in
+        vanilla|neoforge) return 0 ;;
+        *)                return 1 ;;
+    esac
 }
 
 download_jar() {
@@ -772,6 +879,7 @@ cmd_install_mrpack() {
 
     local -a dl_paths=() dl_urls=() dl_hashes=()
     local path url sha512 dest resolved
+    local reused=0
 
     # NOTE: fed by process substitution, NOT a pipe. A pipe would run the loop
     # body in a subshell, where `die` exits only that subshell and the install
@@ -797,10 +905,31 @@ cmd_install_mrpack() {
             *) die "Refusing path escaping staging dir: '$path'" ;;
         esac
 
+        # Reuse a file the current install already has, byte for byte, instead
+        # of fetching it again. A point release of a large pack changes a
+        # handful of mods; the manifest's sha512 says exactly which, so the
+        # rest need not cross the network. Placed after the path and allowlist
+        # checks above so it can only ever write where a download could.
+        #
+        # Safe by construction: the hash the file is accepted on is the same
+        # one verify_sha would check the download against. A mismatch (or a
+        # missing hash) just falls through and downloads normally.
+        if [[ -n "$sha512" && "$sha512" != "null" && -f "$MC_BASE/$path" ]] \
+            && [[ "$(sha512sum "$MC_BASE/$path" 2>/dev/null | cut -d' ' -f1)" == "${sha512,,}" ]]; then
+            mkdir -p "$(dirname "$dest")"
+            cp "$MC_BASE/$path" "$dest" || die "Failed to reuse existing file: $path"
+            reused=$(( reused + 1 ))
+            continue
+        fi
+
         dl_paths+=("$path")
         dl_urls+=("$url")
         dl_hashes+=("$sha512")
     done < <(printf '%s\n' "$files_tsv")
+
+    if (( reused > 0 )); then
+        info "Reused ${reused} unchanged file(s) from the current install."
+    fi
 
     local total=${#dl_paths[@]}
     if (( total > 0 )); then
@@ -887,23 +1016,41 @@ cmd_install_mrpack() {
 cmd_install() {
     # Parse flags
     # assume_yes is decided here, from --yes/-y below, then passed to callees.
-    local mrpack_file="" assume_yes="no"
+    local mrpack_file="" assume_yes="no" eula_ok="no" force="no"
     load_config  # seed defaults before flag parsing
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --type)      SERVER_TYPE="$2";        shift 2 ;;
-            --version)   MINECRAFT_VERSION="$2";  shift 2 ;;
-            --yes|-y)    assume_yes="yes";        shift   ;;
-            *.mrpack)    mrpack_file="$1";        shift   ;;
-            --)          shift; break ;;
-            -*)          die "Unknown option: $1" ;;
-            *)           die "Unexpected argument: $1 (did you mean --type or --version?)" ;;
+            --type)         SERVER_TYPE="$2";        shift 2 ;;
+            --version)      MINECRAFT_VERSION="$2";  shift 2 ;;
+            --yes|-y)       assume_yes="yes";        shift   ;;
+            --accept-eula)  eula_ok="yes";           shift   ;;
+            --force)        force="yes";             shift   ;;
+            *.mrpack)       mrpack_file="$1";        shift   ;;
+            --)             shift; break ;;
+            -*)             die "Unknown option: $1" ;;
+            *)              die "Unexpected argument: $1 (did you mean --type or --version?)" ;;
         esac
     done
 
     require_root
     acquire_lock
+
+    # Installing over a live server overwrites server.jar and repins the version
+    # in server.conf, with none of the protections upgrade has — no backup, no
+    # graceful stop. Every other mutating command guards on require_server;
+    # this is its inverse. Refuse and point at the command that does it safely.
+    if [[ "$force" != "yes" ]] && server_installed; then
+        error "A server is already installed in ${MC_BASE}."
+        error "To change version:  mc upgrade [--version VER]"
+        error "To reinstall over it (overwrites server.jar, no backup taken):"
+        die   "                    mc install --force"
+    fi
+
+    # Before anything is downloaded: no point fetching a few hundred MB of
+    # server jar and mods only to refuse the licence afterwards. Covers the
+    # mrpack branch below too.
+    accept_eula "$eula_ok"
 
     if [[ -n "$mrpack_file" ]]; then
         cmd_install_mrpack "$mrpack_file" "$assume_yes"
@@ -943,7 +1090,9 @@ cmd_install() {
         init_server_properties
     fi
 
-    systemctl daemon-reload 2>/dev/null || true
+    if [[ "$_MC_TIMER_DROPIN_CHANGED" == "yes" ]]; then
+        systemctl daemon-reload 2>/dev/null || true
+    fi
 
     info "Installed $SERVER_TYPE $MINECRAFT_VERSION"
     ensure_java "$JAVA_VERSION" "$assume_yes"
@@ -954,17 +1103,19 @@ cmd_install() {
 
 cmd_upgrade() {
     # assume_yes is decided here, from --yes/-y below, then passed to callees.
-    local mrpack_file="" new_version="" assume_yes="no"
+    local mrpack_file="" new_version="" assume_yes="no" eula_ok="no" force="no"
     load_config
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --version) new_version="$2"; shift 2 ;;
-            --yes|-y)  assume_yes="yes"; shift   ;;
-            *.mrpack)  mrpack_file="$1"; shift   ;;
-            --)        shift; break ;;
-            -*)        die "Unknown option: $1" ;;
-            *)         die "Unexpected argument: $1" ;;
+            --version)      new_version="$2"; shift 2 ;;
+            --yes|-y)       assume_yes="yes"; shift   ;;
+            --accept-eula)  eula_ok="yes";    shift   ;;
+            --force)        force="yes";      shift   ;;
+            *.mrpack)       mrpack_file="$1"; shift   ;;
+            --)             shift; break ;;
+            -*)             die "Unknown option: $1" ;;
+            *)              die "Unexpected argument: $1" ;;
         esac
     done
 
@@ -972,9 +1123,32 @@ cmd_upgrade() {
     require_server
     acquire_lock
 
+    # A no-op on any server installed through mc, which already accepted. It
+    # matters for one case: a server whose eula.txt was never written or was
+    # set back to false. start.sh refuses to launch that, so upgrading without
+    # this check would hand back a server that cannot start.
+    accept_eula "$eula_ok"
+
     # mrpack-based servers require a new mrpack.
     if [[ -f "$MRPACK_MANIFEST" && -z "$mrpack_file" ]]; then
         die "This server was installed from a .mrpack file. Provide a new .mrpack to upgrade: mc upgrade <new.mrpack>"
+    fi
+
+    # Decide whether there is anything to do BEFORE the backup and the stop
+    # below. Those are the expensive parts — a full archive of the world, then
+    # downtime that stop.sh may stretch to five minutes on a populated server —
+    # and `mc upgrade` run on a schedule lands here with nothing to do most
+    # times it fires.
+    if [[ -z "$mrpack_file" && "$force" != "yes" ]] \
+        && version_identifies_artifact "$SERVER_TYPE"; then
+        local target resolved
+        target="${new_version:-$MINECRAFT_VERSION}"
+        resolved=$(resolve_version "$SERVER_TYPE" "$target" 2>/dev/null) || resolved=""
+        if [[ -n "$resolved" && "$resolved" == "$MINECRAFT_VERSION" ]]; then
+            info "Already running ${SERVER_TYPE} ${resolved} — nothing to upgrade."
+            info "Reinstall this same version with: mc upgrade --force"
+            return 0
+        fi
     fi
 
     # Backup before any changes.
@@ -1029,9 +1203,29 @@ cmd_upgrade() {
 # ── cmd_start ──────────────────────────────────────────────────────────────────
 
 cmd_start() {
+    local eula_ok="no"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --accept-eula) eula_ok="yes"; shift ;;
+            --)            shift; break ;;
+            -*)            die "Unknown option: $1" ;;
+            *)             die "Unexpected argument: $1" ;;
+        esac
+    done
+
     require_root
     require_server
-    is_running && die "Server is already running."
+    # start.sh refuses to launch a server that has not accepted, so offer the
+    # flag at the point of failure. This is also the only way to accept on an
+    # existing server: re-running install would re-download the jar.
+    accept_eula "$eula_ok"
+    # Desired state already reached — say so and succeed. `systemctl start` on
+    # an active unit exits 0 for the same reason: a config-management run that
+    # asks for a running server and finds one has not failed.
+    if is_running; then
+        info "Server is already running."
+        return 0
+    fi
     systemctl start minecraft
     # Wait up to 60 s for the unit to reach active state. Poll at 0.5 s and
     # check *before* the first sleep: the old 5 s-first loop charged a server
@@ -1051,7 +1245,11 @@ cmd_start() {
 
 cmd_stop() {
     require_root
-    is_running || die "Server is not running."
+    # As in cmd_start: already stopped is the requested state, not a failure.
+    if ! is_running; then
+        info "Server is not running."
+        return 0
+    fi
     # Graceful warnings are handled by ExecStop=/usr/lib/mc/stop.sh in the unit.
     systemctl stop minecraft
     info "Server stopped."
@@ -1060,8 +1258,20 @@ cmd_stop() {
 # ── cmd_restart ────────────────────────────────────────────────────────────────
 
 cmd_restart() {
+    local eula_ok="no"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --accept-eula) eula_ok="yes"; shift ;;
+            --)            shift; break ;;
+            -*)            die "Unknown option: $1" ;;
+            *)             die "Unexpected argument: $1" ;;
+        esac
+    done
+
     require_root
     require_server
+    # Restart starts the server, so it meets the same gate as cmd_start.
+    accept_eula "$eula_ok"
     # Stop triggers ExecStop (warnings). Start brings it back up.
     is_running && systemctl stop minecraft
     systemctl start minecraft
@@ -1241,6 +1451,13 @@ cmd_delete() {
     require_root
     acquire_lock
 
+    # Nothing to delete is not a failure, but it should not prompt for a
+    # destructive confirmation either.
+    if ! server_installed; then
+        info "No server installed; nothing to delete."
+        return 0
+    fi
+
     echo -e "${RED}WARNING: This will permanently delete the server and all its data.${NC}"
     read -rp "Type 'delete' to confirm: " confirm
     [[ "$confirm" == "delete" ]] || die "Confirmation did not match. Aborting."
@@ -1268,19 +1485,27 @@ mc — Minecraft server lifecycle manager
 Usage: mc <command> [options]
 
 Server management:
-  install [--type TYPE] [--version VER] [--yes]   Install the server jar
-  install <pack.mrpack> [--yes]                   Install from a Modrinth modpack
-  upgrade [--version VER] [--yes]                 Upgrade the server jar
-  upgrade <new.mrpack> [--yes]                     Upgrade from a new Modrinth modpack
-  delete                                          Permanently remove the server
+  install [--type TYPE] [--version VER]   Install the server jar
+  install <pack.mrpack>                   Install from a Modrinth modpack
+  upgrade [--version VER]                 Upgrade the server jar
+  upgrade <new.mrpack>                    Upgrade from a new Modrinth modpack
+  delete                                  Permanently remove the server
 
-  --yes / -y   Auto-install a missing Java runtime without prompting
-               (required in non-interactive contexts, e.g. Docker).
+  --accept-eula   Accept the Minecraft EULA (https://www.minecraft.net/eula).
+                  Also accepted by start/restart. Without it, mc asks; a
+                  non-interactive run fails.
+  --yes / -y      Auto-install a missing Java runtime without prompting.
+  --force         install: reinstall over an existing server (overwrites
+                  server.jar, takes no backup).
+                  upgrade: reinstall even when already at the target version.
+
+  --accept-eula and --yes are both needed for a fully unattended install
+  (cloud-init, Ansible, Docker).
 
 Lifecycle:
-  start                                   Start the server
+  start [--accept-eula]                   Start the server
   stop                                    Stop the server (graceful if RCON available)
-  restart                                 Restart the server
+  restart [--accept-eula]                 Restart the server
   status                                  Show systemd service status
 
 Data management:

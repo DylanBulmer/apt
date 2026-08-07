@@ -16,9 +16,9 @@ shift || true
 case "$_MC_CMD" in
     install) cmd_install  "$@" ;;
     upgrade) cmd_upgrade  "$@" ;;
-    start)   cmd_start        ;;
+    start)   cmd_start    "$@" ;;
     stop)    cmd_stop         ;;
-    restart) cmd_restart      ;;
+    restart) cmd_restart  "$@" ;;
     status)  cmd_status       ;;
     backup)  cmd_backup       ;;
     restore) cmd_restore  "$@" ;;

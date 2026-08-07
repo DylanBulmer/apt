@@ -30,24 +30,32 @@ case "$1" in
 
         # Enable RCON in server.properties
         PROPS="$SERVER_DIR/server.properties"
+        SETTINGS_CHANGED=no
         if [[ -f "$PROPS" ]]; then
-            if grep -q "^enable-rcon=" "$PROPS"; then
-                sed -i "s|^enable-rcon=.*|enable-rcon=true|" "$PROPS"
-            else
-                echo "enable-rcon=true" >> "$PROPS"
-            fi
+            # Set a property to a value, reporting whether it actually moved.
+            # The restart below is gated on this: reconfiguring a server that
+            # already has these exact values is pure downtime, and on a
+            # populated server stop.sh spends five minutes counting players
+            # down before it goes. An unattended `apt upgrade` that happens to
+            # pull a new mc-rcon must not cost that for a no-op.
+            set_prop() {
+                local key="$1" value="$2" current
+                if grep -q "^${key}=" "$PROPS"; then
+                    current=$(sed -n "s|^${key}=||p" "$PROPS" | head -1)
+                    [[ "$current" == "$value" ]] && return 0
+                    # '|' is the sed delimiter here and the password charset is
+                    # base64url (A-Za-z0-9-_), so no value reaching this can
+                    # contain one. Ports and 'true' are likewise safe.
+                    sed -i "s|^${key}=.*|${key}=${value}|" "$PROPS"
+                else
+                    echo "${key}=${value}" >> "$PROPS"
+                fi
+                SETTINGS_CHANGED=yes
+            }
 
-            if grep -q "^rcon.port=" "$PROPS"; then
-                sed -i "s|^rcon.port=.*|rcon.port=${RCON_PORT}|" "$PROPS"
-            else
-                echo "rcon.port=${RCON_PORT}" >> "$PROPS"
-            fi
-
-            if grep -q "^rcon.password=" "$PROPS"; then
-                sed -i "s|^rcon.password=.*|rcon.password=${PASSWORD}|" "$PROPS"
-            else
-                echo "rcon.password=${PASSWORD}" >> "$PROPS"
-            fi
+            set_prop enable-rcon   "true"
+            set_prop rcon.port     "$RCON_PORT"
+            set_prop rcon.password "$PASSWORD"
 
             chown "$MC_USER:$MC_USER" "$PROPS"
             # This file now holds the RCON password. 0644 (the default from the
@@ -56,10 +64,11 @@ case "$1" in
             chmod 640 "$PROPS"
         fi
 
-        # Restart server if it is running so RCON settings take effect
-        if command -v systemctl &>/dev/null \
+        # Restart only if something above actually changed — see set_prop.
+        if [[ "$SETTINGS_CHANGED" == "yes" ]] \
+                && command -v systemctl &>/dev/null \
                 && systemctl is-active --quiet minecraft 2>/dev/null; then
-            echo "mc-rcon: restarting minecraft service to enable RCON..."
+            echo "mc-rcon: restarting minecraft service to apply RCON settings..."
             systemctl restart minecraft || true
         fi
         ;;

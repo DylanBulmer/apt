@@ -73,6 +73,24 @@ source /usr/lib/mc/common.sh
 load_config
 SERVER_DIR="$MC_BASE"
 
+# ── EULA gate ──────────────────────────────────────────────────────────────────
+#
+# Checked here, before the JVM is launched, for two reasons. The server's own
+# check writes a default eula.txt and exits almost immediately, which systemd
+# reports as a start followed by a puzzling stop with nothing useful in the
+# journal. And `systemctl start minecraft` bypasses the mc CLI entirely, so
+# this is the only thing standing between a stray start and a server running
+# under a licence nobody accepted.
+if ! eula_accepted; then
+    # Not "re-run mc install": that re-downloads the server jar. `mc start`
+    # accepts the flag precisely so an existing server has a cheap way back.
+    echo "ERROR: the Minecraft EULA has not been accepted." >&2
+    echo "       https://www.minecraft.net/eula" >&2
+    echo "       Accept it with: mc start --accept-eula" >&2
+    echo "       or set eula=true in ${SERVER_DIR}/eula.txt" >&2
+    exit 1
+fi
+
 # ── Resolve Java binary ────────────────────────────────────────────────────────
 
 JAVA_BIN="java"
