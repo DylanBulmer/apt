@@ -50,7 +50,7 @@ network, no `systemctl`.
 
 > `mc_sprop_get` `load_config` `mc_required_java` `java_major_version`
 > `find_java_binary` `eula_accepted` `mc_rcon_port` `mc_rcon_available`
-> `mc_rcon_call`
+> `mc_rcon_call` `generate_rcon_password`
 
 `server.properties` is the source of truth for the keys the JVM owns
 (`server-port`, `rcon.port`, `enable-rcon`, `rcon.password`). `mc_sprop_get` is
@@ -66,9 +66,9 @@ the only parser for them — read through it, never re-grep the file — and
 > *config* `write_config`
 > *cleanup/lock* `mc_cleanup` `mc_cleanup_arm` `cleanup_register_dir` `cleanup_unregister_dir` `acquire_lock`
 > *java/eula* `ensure_java` `accept_eula`
-> *systemd/rcon* `is_running` `rcon_available` `generate_rcon_password` `rcon_command`
+> *systemd/rcon* `is_running` `rcon_command` (availability and password generation are in `common.sh`)
 > *properties* `sprop_secure` `sprop_set` `managed_property_value` `merge_server_properties` `init_server_properties` (reads go through `mc_sprop_get`)
-> *download* `validate_version` `verify_sha` `download_paper` `download_vanilla` `download_fabric` `install_neoforge` `resolve_version` `version_identifies_artifact` `download_jar`
+> *download* `validate_version` `verify_sha` `download_paper` `download_vanilla` `download_fabric` `install_neoforge` `resolve_version` `version_identifies_artifact` `download_jar` `install_server_artifact` (the staging→MC_BASE step shared by install/upgrade)
 > *mrpack* `mrpack_url_allowed` `make_staging_dir` `mrpack_safe_path` `mrpack_extract_overrides` `cmd_install_mrpack`
 > *start helpers* `start_and_verify` `start_failed` `settled_running` `report_unit_failure`
 > *commands* `cmd_install` `cmd_upgrade` `cmd_start` `cmd_stop` `cmd_restart` `cmd_status` `cmd_backup` `cmd_restore` `cmd_logs` `cmd_delete` `usage`
@@ -146,14 +146,43 @@ silently falls back to compiled-in defaults.
 
 ## Verifying changes
 
-No Debian box and no `dpkg-deb` on macOS, so `./scripts/build.sh` is unavailable
-locally. What does work:
+**Test in Docker, not on the host.** The `mc-tests:debian13` image (Debian 13,
+bash 5.2, `rsync`/`curl`/`jq`/`unzip`/`gcc`/`dpkg-deb`, plus a `systemctl` stub
+on PATH) runs the real thing end to end — build the `.deb`, install it, drive
+the maintainer scripts. It has an ENTRYPOINT, so override it:
 
-**Syntax-check everything touched:**
+```sh
+docker run --rm --entrypoint bash -v "$PWD":/work:ro mc-tests:debian13 -c '
+  cp -r /work /build && cd /build && rm -rf dist staging
+  bash scripts/build.sh mc-server && bash scripts/build.sh mc-rcon
+  dpkg -i dist/mc-server_*.deb && dpkg -i dist/mc-rcon_*.deb
+  # then: /var/lib/dpkg/info/mc-rcon.postinst configure
+'
+```
+
+Copy to `/build` first and mount the repo read-only — `build.sh` writes `dist/`
+and `staging/` and `chmod`s the tree in place.
+
+**macOS bash is 3.2 and will mislead you.** Two traps specifically:
+
+- `set -e` is *disabled inside* `( ... )` when the subshell is on the left of
+  `||` — including `( ... ) || rc=$?`. A test written that way passes
+  vacuously because the abort it checks for never fires. This is real bash
+  behaviour, not a 3.2 quirk; it bites on 5.2 too. Test an abort path by
+  running a **separate `bash` process** and capturing `$?` with `set +e`
+  around it.
+- `stat -f '%OLp'` (BSD) vs `stat -c '%a'` (GNU) — mode assertions need both.
+
+**Syntax-check everything touched** (fine on the host):
 ```sh
 for f in packages/mc-server/usr/lib/mc/*.sh packages/mc-server/usr/bin/mc \
          packages/mc-server/DEBIAN/postinst; do bash -n "$f" && echo "OK $f"; done
 ```
+
+**Lint** with `shellcheck -s bash -S warning -e SC1091`. `SC2034` "appears
+unused" fires constantly on `common.sh` — those globals are consumed by
+`lib.sh`/`start.sh` and the warning is a false positive across file boundaries.
+A hit on a *colour code* or a helper nothing sources, though, is real dead code.
 
 **Exercise a helper in a sandbox** by sourcing just its section and overriding
 the path globals — most of `lib.sh` is testable unprivileged this way. `chown`
@@ -165,10 +194,14 @@ MC_BASE=/tmp/sandbox   # then call init_server_properties, merge_server_properti
 
 **Test systemd-facing logic with mocked `systemctl`/`journalctl`** — shell
 functions shadow real commands, so state machines like `start_and_verify` can be
-driven through failure, success, and race cases without systemd present.
+driven through failure, success, and race cases without systemd present. (The
+container's `systemctl` stub echoes its arguments, which is enough to assert
+*whether* a restart was triggered — e.g. that a no-op reconfigure does not
+restart a populated server.)
 
-Unverifiable locally: `.deb` build, `systemd-analyze verify` on the unit, and
-anything requiring a real JVM. Say so rather than implying it was tested.
+Still unverifiable, even in the container: `systemd-analyze verify` on the unit
+(no running systemd, only the stub) and anything needing a real JVM or a real
+Minecraft server. Say so rather than implying it was tested.
 
 ## Shipping
 

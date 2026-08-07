@@ -9,7 +9,7 @@ source /usr/lib/mc/common.sh
 
 # ── Output helpers ─────────────────────────────────────────────────────────────
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 info()  { echo -e "${GREEN}[mc]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[mc]${NC} $*" >&2; }
@@ -314,13 +314,6 @@ is_running() {
 
 # ── RCON helpers ───────────────────────────────────────────────────────────────
 
-# Kept as the name the command implementations (and the mc-rcon plugin) use.
-rcon_available() { mc_rcon_available; }
-
-generate_rcon_password() {
-    head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
-}
-
 # Send a single RCON command. Returns 1 if RCON is not configured or unavailable.
 # load_config first, because the port is derived from SERVER_PORT.
 #
@@ -328,7 +321,7 @@ generate_rcon_password() {
 # run with the world's saves disabled, so a hang there would leave the server
 # unable to persist chunks indefinitely.
 rcon_command() {
-    rcon_available || return 1
+    mc_rcon_available || return 1
     load_config
     mc_rcon_call "$MC_RCON_TIMEOUT" "$@" 2>/dev/null
 }
@@ -825,16 +818,21 @@ cmd_install_mrpack() {
     # assume_yes is passed down by cmd_install/cmd_upgrade, not parsed here.
     local mrpack_file="$1" assume_yes="${2:-no}"
 
-    # Seed config defaults before anything else. cmd_install/cmd_upgrade have
-    # already done this, but /usr/bin/mc's plugin fallback dispatches ANY
-    # cmd_* function by name, so `mc install_mrpack pack.mrpack` reaches this
-    # function directly. Without this call, SERVER_RAM / SERVER_PORT /
-    # BACKUP_KEEP / BACKUP_SCHEDULE / JAVA_OPTS are never initialised and
-    # write_config() below aborts under `set -u` — after the pack has already
-    # been rsynced into MC_BASE, leaving an installed server with no
-    # server.conf. Re-running load_config on the normal path is harmless: the
-    # values it seeds for SERVER_TYPE / MINECRAFT_VERSION are unconditionally
-    # replaced from the manifest a few lines below.
+    # Seed config defaults before anything else.
+    #
+    # Both callers (cmd_install, cmd_upgrade) already do this, so today the call
+    # is redundant — kept because the failure it prevents is disproportionate to
+    # its cost. Without it, SERVER_RAM / SERVER_PORT / BACKUP_KEEP /
+    # BACKUP_SCHEDULE / JAVA_OPTS are unset and write_config() below aborts
+    # under `set -u`, AFTER the pack has been rsynced into MC_BASE — an
+    # installed server with no server.conf.
+    #
+    # It used to be load-bearing: /usr/bin/mc dispatched any cmd_* function by
+    # name, so `mc install_mrpack pack.mrpack` entered here directly. The
+    # dispatcher now requires mc_register_command, which closed that path.
+    # Re-running load_config is harmless either way: the SERVER_TYPE /
+    # MINECRAFT_VERSION it seeds are unconditionally replaced from the manifest
+    # a few lines below.
     load_config
 
     [[ -f "$mrpack_file" ]] || die "File not found: $mrpack_file"
@@ -1044,6 +1042,42 @@ cmd_install_mrpack() {
     ensure_java "$JAVA_VERSION" "$assume_yes"
 }
 
+# ── Artifact installation ──────────────────────────────────────────────────────
+
+# Fetch the configured SERVER_TYPE/MINECRAFT_VERSION into MC_BASE through a
+# staging dir, and repoint MINECRAFT_VERSION at the version actually resolved.
+#
+# Shared by cmd_install and cmd_upgrade, which carried a copy each. The copies
+# had already drifted in shape — install used an empty-string `staging` sentinel
+# and a trailing `if [[ -n "$staging" ]]` block to reach the rsync that only its
+# NeoForge branch needed, while upgrade simply put the rsync in that branch — so
+# the two had to be read side by side to confirm they still did the same thing.
+#
+# Staging exists because both paths write into a live MC_BASE: nothing lands
+# there until the artifact is complete and verified. The dir is registered with
+# the cleanup registry for the duration, so an abort mid-download does not leave
+# it behind.
+install_server_artifact() {
+    local staging
+    staging=$(make_staging_dir)
+    cleanup_register_dir "$staging"
+
+    if [[ "$SERVER_TYPE" == "neoforge" ]]; then
+        # NeoForge's installer populates a whole tree (run.sh, libraries/), so
+        # the staged tree is merged rather than a single jar moved.
+        install_neoforge "$MINECRAFT_VERSION" "$staging"
+        MINECRAFT_VERSION="$RESOLVED_VERSION"
+        rsync -a "${staging}/" "${MC_BASE}/"
+    else
+        download_jar "$SERVER_TYPE" "$MINECRAFT_VERSION" "${staging}/server.jar"
+        MINECRAFT_VERSION="$RESOLVED_VERSION"
+        mv "${staging}/server.jar" "$MC_BASE/server.jar"
+    fi
+
+    cleanup_unregister_dir "$staging"
+    rm -rf "$staging"
+}
+
 # ── cmd_install ────────────────────────────────────────────────────────────────
 
 cmd_install() {
@@ -1092,28 +1126,7 @@ cmd_install() {
 
     mkdir -p "$MC_BASE"
 
-    local staging
-    staging=$(make_staging_dir)
-    cleanup_register_dir "$staging"
-
-    if [[ "$SERVER_TYPE" == "neoforge" ]]; then
-        install_neoforge "$MINECRAFT_VERSION" "$staging"
-        MINECRAFT_VERSION="$RESOLVED_VERSION"
-    else
-        local tmp_jar="${staging}/server.jar"
-        download_jar "$SERVER_TYPE" "$MINECRAFT_VERSION" "$tmp_jar"
-        MINECRAFT_VERSION="$RESOLVED_VERSION"
-        mv "$tmp_jar" "$MC_BASE/server.jar"
-        cleanup_unregister_dir "$staging"
-        rm -rf "$staging"
-        staging=""
-    fi
-
-    if [[ -n "$staging" ]]; then
-        rsync -a "${staging}/" "${MC_BASE}/"
-        cleanup_unregister_dir "$staging"
-        rm -rf "$staging"
-    fi
+    install_server_artifact
 
     JAVA_VERSION=$(mc_required_java "$MINECRAFT_VERSION")
     write_config
@@ -1205,24 +1218,7 @@ cmd_upgrade() {
     else
         [[ -n "$new_version" ]] && MINECRAFT_VERSION="$new_version"
 
-        local staging
-        staging=$(make_staging_dir)
-        cleanup_register_dir "$staging"
-
-        if [[ "$SERVER_TYPE" == "neoforge" ]]; then
-            install_neoforge "$MINECRAFT_VERSION" "$staging"
-            MINECRAFT_VERSION="$RESOLVED_VERSION"
-            rsync -a "${staging}/" "${MC_BASE}/"
-            cleanup_unregister_dir "$staging"
-            rm -rf "$staging"
-        else
-            local tmp_jar="${staging}/server.jar"
-            download_jar "$SERVER_TYPE" "$MINECRAFT_VERSION" "$tmp_jar"
-            MINECRAFT_VERSION="$RESOLVED_VERSION"
-            mv "$tmp_jar" "$MC_BASE/server.jar"
-            cleanup_unregister_dir "$staging"
-            rm -rf "$staging"
-        fi
+        install_server_artifact
 
         JAVA_VERSION=$(mc_required_java "$MINECRAFT_VERSION")
         ensure_java "$JAVA_VERSION" "$assume_yes"
@@ -1438,8 +1434,18 @@ cmd_backup() {
     if command -v pigz >/dev/null 2>&1; then
         # Multi-threaded gzip: single-threaded `tar -czf` held the world in
         # save-off for the entire compression, so chunks could not flush.
-        # lib.sh does not set `pipefail` itself, so both stages are checked
-        # explicitly via PIPESTATUS instead of relying on the pipeline status.
+        #
+        # PIPESTATUS rather than the pipeline's own status, which `pipefail`
+        # (set by /usr/bin/mc) already makes non-zero on any failure: the point
+        # is to name WHICH stage failed in the message below, since "tar failed"
+        # and "pigz failed" send an operator to different places.
+        #
+        # THE TWO BRANCHES ARE IDENTICAL ON PURPOSE. `set -e` would abort the
+        # command before the capture on a bare pipeline, and every construct
+        # that could stand in for the `if` — `|| true`, a trailing `:` — is
+        # itself a command, which overwrites PIPESTATUS with its own result.
+        # Wrapping it in `if` is the only form that both survives `set -e` and
+        # leaves PIPESTATUS intact for the next statement.
         local -a rc=()
         if tar -c "${tar_excludes[@]}" -C "$parent_dir" "$base_name" | pigz > "$backup_file"; then
             rc=("${PIPESTATUS[@]}")

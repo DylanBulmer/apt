@@ -236,6 +236,23 @@ mc_rcon_port() {
     echo $(( port + 10 ))
 }
 
+# Generate an RCON password: 24 random bytes in base64url.
+#
+# THE CHARSET IS LOAD-BEARING, not cosmetic. base64url (A-Za-z0-9-_) excludes
+# every character that would need escaping downstream — in particular '|', which
+# mc-rcon's postinst uses as its sed delimiter when writing rcon.password into
+# server.properties, and '=', which would be ambiguous in a properties line. The
+# `tr` calls are what enforce that: '+/' are folded to '-_' and '=' padding is
+# stripped.
+#
+# Defined here rather than in lib.sh because the only caller is mc-rcon's
+# postinst. It previously lived in lib.sh, where nothing called it, while the
+# postinst carried a verbatim copy of this pipeline — two definitions of a
+# security-relevant charset, either of which could have been "tidied" alone.
+generate_rcon_password() {
+    head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
+}
+
 # True when RCON is usable: a password file exists and the client is installed
 # (the mc-rcon package provides it; RCON is off by default without it).
 mc_rcon_available() {

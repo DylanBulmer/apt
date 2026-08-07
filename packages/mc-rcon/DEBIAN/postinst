@@ -33,7 +33,7 @@ case "$1" in
 
         # Generate password if not present
         if [[ ! -f "$PASSWD_FILE" ]]; then
-            head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=' > "$PASSWD_FILE"
+            generate_rcon_password > "$PASSWD_FILE"
             chmod 640 "$PASSWD_FILE"
             chown root:"$MC_USER" "$PASSWD_FILE"
         fi
