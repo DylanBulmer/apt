@@ -11,9 +11,9 @@ set -euo pipefail
 #                               those options became stable in Java 9–11 and the
 #                               unlock flag could silently enable other experimental
 #                               behaviour in newer runtimes.
-# Java 21 → FLAGS_ZGC           Generational ZGC; -XX:+ZGenerational was introduced
-# Java 25 →                     as experimental in Java 21 and became the ZGC default
-#                               in Java 23, but specifying it is valid on all versions.
+# Java 21 → FLAGS_ZGC           Generational ZGC. See FLAG_ZGENERATIONAL below for
+# Java 25 →                     why the generational switch is applied by version
+#                               rather than folded into this preset.
 
 # ── Exit codes ─────────────────────────────────────────────────────────────────
 #
@@ -71,10 +71,26 @@ FLAGS_G1GC_JAVA17="\
 
 FLAGS_ZGC="\
 -XX:+UseZGC \
--XX:+ZGenerational \
 -XX:-ZUncommit \
 -XX:+AlwaysPreTouch \
 -XX:+DisableExplicitGC"
+
+# Applied only to Java 21–23, never folded into FLAGS_ZGC above.
+#
+# -XX:+ZGenerational arrived experimental in Java 21, became the ZGC default in
+# Java 23, and was REMOVED in Java 24. On Java 24+ it produces:
+#
+#   OpenJDK 64-Bit Server VM warning: Ignoring option ZGenerational;
+#   support was removed in 24.0
+#
+# Harmless in itself — generational mode is the default there anyway, so the
+# resulting GC behaviour is identical. It matters because obsolete VM options do
+# not stay ignored: the JVM's usual path is ignored → deprecated → rejected, and
+# an option that reaches "Unrecognized VM option" makes the JVM refuse to start
+# at all. That would take the server down on a routine `apt upgrade` of the JRE,
+# with a failure that looks nothing like its cause. Passing the flag only where
+# it exists costs nothing and removes that.
+FLAG_ZGENERATIONAL="-XX:+ZGenerational"
 
 # ── Load config ────────────────────────────────────────────────────────────────
 
@@ -151,6 +167,11 @@ if [[ -z "$SERVER_FLAGS" ]]; then
     [[ "$ACTUAL_VER" =~ ^[0-9]+$ ]] || ACTUAL_VER=17
     if   [[ "$ACTUAL_VER" -ge 21 ]]; then
         SERVER_FLAGS="$FLAGS_ZGC"           # Java 21, 25
+        # Java 24 removed the flag; 23 already defaults to it. Only 21–23 need
+        # it stated, and only 21–22 actually change behaviour because of it.
+        if [[ "$ACTUAL_VER" -le 23 ]]; then
+            SERVER_FLAGS="$SERVER_FLAGS $FLAG_ZGENERATIONAL"
+        fi
     elif [[ "$ACTUAL_VER" -ge 17 ]]; then
         SERVER_FLAGS="$FLAGS_G1GC_JAVA17"   # Java 17
     else
