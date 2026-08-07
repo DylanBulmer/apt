@@ -1,5 +1,5 @@
 Package: mc-rcon
-Version: 0.4.2
+Version: 0.4.3
 Architecture: any
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
 Depends: mc-server

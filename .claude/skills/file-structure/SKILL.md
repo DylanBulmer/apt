@@ -48,8 +48,15 @@ Answers "where is X defined" with no tool call.
 run unprivileged under `ProtectSystem=strict`. Definitions only: no writes, no
 network, no `systemctl`.
 
-> `load_config` `mc_required_java` `java_major_version` `find_java_binary`
-> `eula_accepted` `mc_rcon_port` `mc_rcon_available` `mc_rcon_call`
+> `mc_sprop_get` `load_config` `mc_required_java` `java_major_version`
+> `find_java_binary` `eula_accepted` `mc_rcon_port` `mc_rcon_available`
+> `mc_rcon_call`
+
+`server.properties` is the source of truth for the keys the JVM owns
+(`server-port`, `rcon.port`, `enable-rcon`, `rcon.password`). `mc_sprop_get` is
+the only parser for them — read through it, never re-grep the file — and
+`load_config`/`mc_rcon_port` resolve *through* it, so `SERVER_PORT` in
+`server.conf` is only the seed for a server that has no properties file yet.
 
 **`lib.sh`** — root-only; reached through `usr/bin/mc`.
 
@@ -60,7 +67,7 @@ network, no `systemctl`.
 > *cleanup/lock* `mc_cleanup` `mc_cleanup_arm` `cleanup_register_dir` `cleanup_unregister_dir` `acquire_lock`
 > *java/eula* `ensure_java` `accept_eula`
 > *systemd/rcon* `is_running` `rcon_available` `generate_rcon_password` `rcon_command`
-> *properties* `sprop_secure` `sprop_set` `sprop_get` `managed_property_value` `merge_server_properties` `init_server_properties`
+> *properties* `sprop_secure` `sprop_set` `managed_property_value` `merge_server_properties` `init_server_properties` (reads go through `mc_sprop_get`)
 > *download* `validate_version` `verify_sha` `download_paper` `download_vanilla` `download_fabric` `install_neoforge` `resolve_version` `version_identifies_artifact` `download_jar`
 > *mrpack* `mrpack_url_allowed` `make_staging_dir` `mrpack_safe_path` `mrpack_extract_overrides` `cmd_install_mrpack`
 > *start helpers* `start_and_verify` `start_failed` `settled_running` `report_unit_failure`

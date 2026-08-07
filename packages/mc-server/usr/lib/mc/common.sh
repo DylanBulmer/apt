@@ -33,6 +33,36 @@ MRPACK_MANIFEST="$MC_CONFIG/server.mrpack.json"
 LOCK_FILE="/run/minecraft/mc.lock"
 MC_USER="minecraft"
 
+# ── server.properties (read-only) ──────────────────────────────────────────────
+
+# Read one key out of the live server.properties. Prints the value (empty when
+# the key, or the file, is not there) and ALWAYS succeeds.
+#
+# This lives here rather than in lib.sh because server.properties is the source
+# of truth for the keys the JVM owns — server-port, rcon.port, enable-rcon,
+# rcon.password — and stop.sh/reload.sh have to resolve the RCON port through it
+# without pulling in lib.sh. Everything that reads a property calls this, so
+# there is one parser rather than several that can disagree.
+#
+# NEVER RETURNS NON-ZERO: every caller runs under `set -euo pipefail`, and a key
+# that is simply absent is a normal answer, not an error. lib.sh used to parse
+# these itself with `grep ... | cut ...`, which took grep's exit status: an
+# absent key returned 1, and the plain assignment in managed_property_value()
+# turned that into an abort of the entire mc invocation. A missing or unreadable
+# file is likewise empty here — start.sh's own gate is what turns an unreadable
+# file into a refusal, and it does so with a legible message.
+mc_sprop_get() {
+    local key="$1"
+    local file="${2:-$MC_BASE/server.properties}"
+    local line
+
+    [[ -r "$file" ]] || return 0
+    # '.' is a regex metacharacter and two of the managed keys contain one, so
+    # an unescaped pattern would let rcon.port match "rconXport" as well.
+    line=$(grep -m1 -- "^${key//./\\.}=" "$file" 2>/dev/null) || return 0
+    printf '%s' "${line#*=}"
+}
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 # Populate the SERVER_* / BACKUP_* / JAVA_* globals from, in increasing order of
@@ -65,6 +95,22 @@ load_config() {
 
     # shellcheck source=/dev/null
     [[ -f "$SERVER_CONF" ]] && source "$SERVER_CONF"
+
+    # server.properties outranks server.conf for the port, because it is what
+    # the JVM actually binds — and what the JVM REWRITES when it shuts down, so
+    # no amount of syncing in the other direction would stick anyway. Editing
+    # server-port used to leave SERVER_PORT stale, which mattered far beyond the
+    # port itself: mc_rcon_port() derives from it, so a hand-edited port silently
+    # pointed every RCON call (mc rcon, the stop countdown, backup's
+    # save-off/save-all) at a port nothing was listening on.
+    #
+    # SERVER_PORT keeps its place in server.conf as the seed
+    # init_server_properties() uses for a server that has no properties file
+    # yet, and write_config() persists whatever this resolves to — so the two
+    # files converge on the truth instead of drifting apart.
+    local live_port
+    live_port=$(mc_sprop_get "server-port")
+    [[ "$live_port" =~ ^[0-9]+$ ]] && SERVER_PORT="$live_port"
     return 0
 }
 
@@ -155,14 +201,37 @@ eula_accepted() {
 
 # ── RCON ───────────────────────────────────────────────────────────────────────
 
-# RCON listens on the game port + 10 (25575 by default). Falls back to the
-# stock port so callers that have not run load_config still compute something
-# sane rather than failing under `set -u`.
+# The port to dial for RCON.
+#
+# rcon.port in server.properties is checked FIRST and used verbatim, because it
+# is the port the JVM binds. The +10 convention below is only this toolchain's
+# default for a server it is setting up; an operator who sets rcon.port by hand
+# — or a modpack that ships one — is not obliged to follow it, and the old
+# unconditional SERVER_PORT+10 meant every such server had a working RCON
+# listener that nothing in mc could reach. That failure is quiet and expensive:
+# stop.sh reads an unreachable RCON as "player count unknown" and takes the
+# 5-minute countdown on every stop, and cmd_backup loses save-off/save-all and
+# archives a world that was never flushed.
+#
+# Order: what the JVM binds → the convention applied to the live game port →
+# the convention applied to configured SERVER_PORT → the stock port. Falling
+# through to the last of those keeps callers that never ran load_config working
+# rather than failing under `set -u`.
 mc_rcon_port() {
-    local port="${SERVER_PORT:-25565}"
+    local port
+
+    port=$(mc_sprop_get "rcon.port")
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$port"
+        return 0
+    fi
+
+    port=$(mc_sprop_get "server-port")
     # Same reasoning as mc_required_java: never let an unvalidated string reach
-    # an arithmetic context. A malformed SERVER_PORT falls back to the stock
-    # port instead of being evaluated as an expression.
+    # an arithmetic context. Anything that is not a plain integer — from the
+    # properties file or from config — falls back rather than being evaluated
+    # as an expression.
+    [[ "$port" =~ ^[0-9]+$ ]] || port="${SERVER_PORT:-25565}"
     [[ "$port" =~ ^[0-9]+$ ]] || port=25565
     echo $(( port + 10 ))
 }

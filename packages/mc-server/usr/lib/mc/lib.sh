@@ -400,13 +400,6 @@ sprop_set() {
     mv -f "$tmp" "$file"
 }
 
-sprop_get() {
-    local key="$1"
-    # The keys we manage contain '.' (rcon.port, rcon.password), which grep
-    # would otherwise treat as "any character".
-    grep -m1 -- "^${key//./\\.}=" "$MC_BASE/server.properties" 2>/dev/null | cut -d= -f2-
-}
-
 # Keys the system owns. A pack override never gets to set these.
 MC_MANAGED_PROPS=(server-port enable-rcon rcon.port rcon.password)
 
@@ -418,7 +411,7 @@ managed_property_value() {
     local key="$1" current=""
 
     if [[ -f "$MC_BASE/server.properties" ]]; then
-        current=$(sprop_get "$key")
+        current=$(mc_sprop_get "$key")
         if [[ -n "$current" ]]; then
             printf '%s' "$current"
             return 0
@@ -477,11 +470,29 @@ merge_server_properties() {
 # or an interactive prompt, and runs before any of this.
 init_server_properties() {
     load_config
+
+    # Seeded through managed_property_value so that "the value the system wants
+    # for a managed key" has ONE definition, shared with merge_server_properties.
+    # The four keys were previously spelled out here, with enable-rcon=false and
+    # an empty password hardcoded — so installing mc-rcon first and running
+    # `mc install` second produced a server with RCON off despite a provisioned
+    # password file, and every RCON-dependent path (the stop countdown, backup's
+    # save-off/save-all, `mc rcon`) silently degraded until someone reinstalled
+    # mc-rcon to trip its postinst again.
+    #
+    # Resolved into variables BEFORE the redirection below, which truncates the
+    # file these values may be read from.
+    local port rcon_enabled rcon_port rcon_password
+    port=$(managed_property_value server-port)
+    rcon_enabled=$(managed_property_value enable-rcon)
+    rcon_port=$(managed_property_value rcon.port)
+    rcon_password=$(managed_property_value rcon.password)
+
     cat > "$MC_BASE/server.properties" <<EOF
-server-port=${SERVER_PORT}
-enable-rcon=false
-rcon.port=$(mc_rcon_port)
-rcon.password=
+server-port=${port}
+enable-rcon=${rcon_enabled}
+rcon.port=${rcon_port}
+rcon.password=${rcon_password}
 EOF
     sprop_secure
 }
