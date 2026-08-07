@@ -1,5 +1,5 @@
 Package: mc-server
-Version: 0.5.5
+Version: 0.6.0
 Architecture: all
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
 Depends: curl, jq, rsync

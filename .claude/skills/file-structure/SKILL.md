@@ -213,3 +213,23 @@ publishes on every push to `main` touching `packages/**`, and reprepro trees are
 regenerated per run — so **any change without a version bump is published under
 the old version and never reaches installed systems.** Bump `Version:` with the
 change, not after.
+
+**Bump in the same commit as the change**, not in a follow-up. A run of commits
+that each change `packages/**` but leave `Version:` alone republishes one
+version number as several different artifacts: whoever installed the earlier one
+is pinned to it forever, because apt only upgrades on a higher version. Check
+what the mirror is really serving before assuming a fix landed:
+
+```sh
+curl -s https://apt.bulmer.dev/dists/stable/main/binary-amd64/Packages | grep -A1 '^Package: mc-'
+curl -sO https://apt.bulmer.dev/pool/main/m/mc-server/mc-server_<ver>_all.deb
+dpkg-deb -x mc-server_<ver>_all.deb /tmp/x && grep -r <a-function-you-added> /tmp/x/usr/lib/mc/
+```
+
+**`mc-rcon` calls shell functions out of `mc-server`'s `common.sh`**, so its
+`Depends:` carries a version floor (`mc-server (>= X.Y.Z)`). Raise it whenever
+the postinst or `commands.d/rcon.sh` starts using a function mc-server did not
+previously define — unversioned, dpkg configures the plugin against an older
+library and the maintainer script dies with `command not found` (exit 127),
+leaving the package half-installed. `DEBIAN/control` takes no comments; the
+reasoning lives in `mc-rcon/DEBIAN/postinst`.

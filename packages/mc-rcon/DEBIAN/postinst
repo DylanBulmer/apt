@@ -7,12 +7,21 @@ COMMON_SH="/usr/lib/mc/common.sh"
 
 case "$1" in
     configure)
-        # Paths, load_config() and mc_rcon_port() come from mc-server, which
-        # Depends: guarantees is unpacked and configured before this runs.
-        # Sourcing it rather than restating the paths and the port convention
-        # here is what keeps this script from drifting away from the CLI: the
-        # port arithmetic below used to live in both places, and only one of
-        # them was ever updated.
+        # Paths, load_config(), mc_rcon_port(), mc_sprop_get() and
+        # generate_rcon_password() all come from mc-server. Sourcing them rather
+        # than restating the paths and the port convention here is what keeps
+        # this script from drifting away from the CLI: the port arithmetic below
+        # used to live in both places, and only one of them was ever updated.
+        #
+        # THE VERSIONED Depends: IN control IS LOAD-BEARING, not decoration.
+        # This file calls shell functions out of another package's private
+        # library, so "mc-server is installed" is not a strong enough claim —
+        # it has to be a version whose common.sh actually defines them.
+        # Unversioned, dpkg happily configured this against an older mc-server
+        # and the script died with `generate_rcon_password: command not found`
+        # (exit 127), leaving mc-rcon half-installed and apt in an error state.
+        # Raise the floor in control whenever this script starts using a
+        # function that mc-server did not previously export.
         [[ -r "$COMMON_SH" ]] || exit 0
         # shellcheck source=/usr/lib/mc/common.sh
         source "$COMMON_SH"
