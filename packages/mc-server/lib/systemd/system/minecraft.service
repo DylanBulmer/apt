@@ -39,12 +39,6 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # NOTE: MemoryDenyWriteExecute is intentionally omitted — the JVM's JIT needs
 # writable+executable pages and would fail to start under it.
 
-# There is deliberately no StandardInput= here, and adding one will not help:
-# every value systemd offers either hands the JVM an immediate EOF (null, the
-# default, and data/file) or needs a terminal or socket this unit does not have.
-# The server console treats EOF on stdin as a shutdown request, so start.sh
-# builds a read-write FIFO and hands that to the JVM instead. See the "Console
-# stdin" section there before changing anything about stdin.
 ExecStart=/usr/lib/mc/start.sh
 ExecStop=/usr/lib/mc/stop.sh
 ExecReload=/usr/lib/mc/reload.sh

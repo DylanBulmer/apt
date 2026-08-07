@@ -179,49 +179,6 @@ if [[ -z "$SERVER_FLAGS" ]]; then
     fi
 fi
 
-# ── Console stdin ──────────────────────────────────────────────────────────────
-#
-# systemd connects a service's stdin to /dev/null unless StandardInput= says
-# otherwise, so the server's console reader gets EOF on its very first read.
-# Current server builds treat that EOF as "the console went away" and shut the
-# server down, which in the journal looks like a completely healthy boot
-# followed by an unexplained clean stop:
-#
-#   [Server thread/INFO]: Done (0.205s)! For help, type "help"
-#   [Server thread/INFO]: Saving chunks for level 'ServerLevel[world]'/...
-#   [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved
-#
-# No error, no stack trace, exit status 0 — so Restart=on-failure does not fire
-# and nothing in this package's own gates is implicated. Older builds let the
-# reader thread die quietly instead, which is why an unchanged unit file starts
-# behaving this way after a server upgrade.
-#
-# The fix is to give the JVM a stdin that stays open and never delivers
-# anything, i.e. what a terminal nobody is typing into looks like. A FIFO
-# opened read-write does exactly that: the descriptor counts as a writer, so
-# reads block forever instead of returning EOF. /dev/zero would also never EOF
-# but delivers an endless stream of NULs, spinning the console thread at 100%.
-#
-# The FIFO is unlinked as soon as it is open — the descriptor keeps it alive,
-# and nothing else needs to find it. It lives under /tmp, which PrivateTmp=true
-# makes both writable (ProtectSystem=strict leaves the rest read-only) and
-# private to this unit. Failure to set it up is a warning, not a refusal: a
-# server that stops after 0.2 s is still better than one that never launches.
-_MC_FIFO="${TMPDIR:-/tmp}/mc-console.$$"
-if mkfifo -m 600 "$_MC_FIFO" 2>/dev/null && exec 3<>"$_MC_FIFO"; then
-    # Both launch paths below exec, so fd 3 is inherited by the JVM and stays
-    # open for its whole life. Even if it were closed, fd 0 is a dup of the
-    # same read-write description and is itself a writer, so EOF never arrives.
-    exec 0<&3
-    rm -f "$_MC_FIFO"
-else
-    rm -f "$_MC_FIFO" 2>/dev/null || true
-    echo "WARNING: could not create a console FIFO in ${TMPDIR:-/tmp}." >&2
-    echo "         Starting anyway; the server may shut itself down as soon" >&2
-    echo "         as it reads EOF from stdin." >&2
-fi
-unset _MC_FIFO
-
 # ── Launch ─────────────────────────────────────────────────────────────────────
 
 cd "$SERVER_DIR"
