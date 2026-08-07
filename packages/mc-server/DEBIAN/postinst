@@ -68,13 +68,36 @@ case "$1" in
             [[ -f "$script" ]] && chmod 755 "$script"
         done
 
-        if command -v systemctl &>/dev/null && systemctl is-system-running --quiet 2>/dev/null; then
+        # Reload systemd so the unit files this package just replaced take
+        # effect, then make sure the backup timer is running.
+        #
+        # GATED ON /run/systemd/system, the canonical "systemd is the running
+        # init" test (it is what dh_installsystemd generates). This used to read
+        # `systemctl is-system-running --quiet`, which is a HEALTH check, not a
+        # presence check: it succeeds only for the exact state "running" and
+        # returns non-zero for "degraded" — the state of any machine with even
+        # one failed unit, anywhere, related or not. Such a machine silently
+        # skipped the reload AND the timer setup.
+        #
+        # When minecraft.service was itself the failed unit the skip became
+        # self-sustaining: the system stayed degraded, so every subsequent
+        # upgrade skipped the reload too, and systemd kept warning that
+        # minecraft.service "changed on disk" until someone ran daemon-reload by
+        # hand — which is the one action the postinst was supposed to cover.
+        if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
 
             # Enable and start the backup timer
             systemctl enable minecraft-backup.timer || true
             systemctl start  minecraft-backup.timer 2>/dev/null || true
         fi
+
+        # NOT restarted here, deliberately. daemon-reload clears the warning and
+        # makes the new unit authoritative for the next start; a running server
+        # keeps the old one until it is restarted. Restarting on the operator's
+        # behalf during an unattended `apt upgrade` would drop players — and on
+        # a populated server stop.sh spends five minutes counting them down
+        # first. Restart when you choose to: mc restart
         ;;
 esac
 

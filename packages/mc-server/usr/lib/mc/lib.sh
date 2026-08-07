@@ -75,9 +75,6 @@ mc_is_plugin_command() {
 # their entry points, but this file is the last line of defence and the one that
 # turns a one-shot parsing slip into persistent root execution — %q makes the
 # output shell-safe regardless of what the value contains.
-# Set by write_config: "yes" when it rewrote the backup timer drop-in, so
-# callers can skip a daemon-reload that would reload nothing.
-_MC_TIMER_DROPIN_CHANGED="no"
 
 write_config() {
     # BACKUP_SCHEDULE is interpolated into a systemd unit drop-in below, where
@@ -101,20 +98,32 @@ write_config() {
         printf 'JAVA_OPTS=%q\n'         "$JAVA_OPTS"
     } > "$SERVER_CONF"
 
-    # Regenerate backup timer drop-in so daemon-reload picks up schedule changes.
+    # Regenerate the backup timer drop-in, and reload systemd if it moved.
+    #
+    # THE RELOAD BELONGS HERE, next to the write that makes it necessary. It
+    # used to be reported to the caller through a _MC_TIMER_DROPIN_CHANGED
+    # global that each caller was expected to check — and only one of the three
+    # did. cmd_upgrade and the .mrpack path through cmd_install_mrpack both
+    # write this drop-in and neither checked the flag, so changing
+    # BACKUP_SCHEDULE by either route wrote a new schedule that systemd never
+    # read. Nothing outside this function can now forget.
     local dropin_dir="/etc/systemd/system/minecraft-backup.timer.d"
     local dropin="${dropin_dir}/schedule.conf"
-    _MC_TIMER_DROPIN_CHANGED="no"
     if [[ -d /etc/systemd/system ]]; then
         local desired
         desired=$(printf '[Timer]\nOnCalendar=\nOnCalendar=%s' "$BACKUP_SCHEDULE")
         # Write only when the schedule actually moved. Rewriting identical
-        # content still bumps mtime and obliges the caller to daemon-reload for
-        # a change that was not made.
+        # content still bumps mtime and would buy a daemon-reload for a change
+        # that was not made.
         if [[ ! -f "$dropin" || "$(cat "$dropin")" != "$desired" ]]; then
             mkdir -p "$dropin_dir"
             printf '%s\n' "$desired" > "$dropin"
-            _MC_TIMER_DROPIN_CHANGED="yes"
+            # /run/systemd/system, not `command -v systemctl`: the binary is
+            # present in plenty of places systemd is not running (containers),
+            # where a reload is a guaranteed error rather than a no-op.
+            if [[ -d /run/systemd/system ]]; then
+                systemctl daemon-reload 2>/dev/null || true
+            fi
         fi
     fi
 }
@@ -1140,10 +1149,6 @@ cmd_install() {
     # on defaults. sprop_secure() now covers that file specifically; the order
     # here is what keeps every *other* root-created file correct too.
     chown -R "$MC_USER:$MC_USER" "$MC_BASE"
-
-    if [[ "$_MC_TIMER_DROPIN_CHANGED" == "yes" ]]; then
-        systemctl daemon-reload 2>/dev/null || true
-    fi
 
     info "Installed $SERVER_TYPE $MINECRAFT_VERSION"
     ensure_java "$JAVA_VERSION" "$assume_yes"
