@@ -15,6 +15,19 @@ set -euo pipefail
 source /usr/lib/mc/common.sh
 load_config
 
+# ── Console logging ────────────────────────────────────────────────────────
+# Everything here goes to stderr, which systemd routes to the journal, so
+# `journalctl -u minecraft` explains what a shutdown did and why it took as long
+# as it did. A stop can occupy up to TimeoutStopSec (375 s) and is otherwise
+# completely opaque — an operator watching `systemctl stop minecraft` hang for
+# five minutes has no way to tell a countdown from a wedged RCON connection.
+#
+# This carries more weight since the announcements moved from `say` to tellraw:
+# the JVM echoed `say` to the server console, so the warnings landed in the
+# journal for free. tellraw is delivered only to players, so the record of what
+# was announced has to be written here.
+log() { echo "[mc] $*" >&2; }
+
 # ── Bounded RCON invocation ────────────────────────────────────────────────
 # EVERY rcon call from this script must be bounded in wall-clock terms, because
 # this script is systemd's ExecStop= and overrunning TimeoutStopSec means the
@@ -42,12 +55,23 @@ rcon_call() {
 
 # mc_say_command (common.sh) builds a tellraw rather than a `say`, so the
 # countdown does not reach players prefixed with "[Rcon]".
+#
+# Mirrored to the journal, and a failed announcement says so: players silently
+# not being warned is exactly the case an operator needs to know about, since
+# the shutdown proceeds on schedule either way. Both branches return 0 — this
+# runs under `set -e` and a missed warning must never abort the stop.
 rcon_say() {
-    rcon_call "$RCON_SAY_TIMEOUT" "$(mc_say_command "$*")" || true
+    if rcon_call "$RCON_SAY_TIMEOUT" "$(mc_say_command "$*")"; then
+        log "Announced to players: $*"
+    else
+        log "WARNING: could not announce to players: $*"
+    fi
 }
 
 rcon_exec() {
-    rcon_call "$RCON_CMD_TIMEOUT" "$*" || true
+    if ! rcon_call "$RCON_CMD_TIMEOUT" "$*"; then
+        log "WARNING: RCON command failed: $*"
+    fi
 }
 
 # ── Player count ───────────────────────────────────────────────────────────
@@ -117,6 +141,9 @@ countdown() {
     local prev=0 mark mins
     for mark in "$@"; do
         if [[ $prev -gt 0 ]]; then
+            # Logged so a long quiet stretch reads as "waiting on purpose"
+            # rather than "wedged".
+            log "Next warning in $((prev - mark))s."
             sleep $((prev - mark))
         fi
         if [[ $mark -ge 60 && $((mark % 60)) -eq 0 ]]; then
@@ -132,12 +159,15 @@ countdown() {
         prev=$mark
     done
     if [[ $prev -gt 0 ]]; then
+        log "Final ${prev}s before the server is told to stop."
         sleep "$prev"
     fi
 }
 
 # Only run the warning sequence if RCON is configured and reachable.
 if mc_rcon_available; then
+    log "Stop requested; asking the server who is online."
+
     # Empty string means "could not determine" — see player_count().
     PLAYERS=$(player_count) || PLAYERS=""
 
@@ -155,17 +185,27 @@ if mc_rcon_available; then
     # purpose: the journal must distinguish "we counted N players" from "we
     # could not count at all", because the latter also indicates RCON trouble.
     if [[ -z "$PLAYERS" ]]; then
-        echo "[mc] Player count unavailable — using full 5-minute countdown." >&2
+        log "Player count unavailable — assuming players are online; triggering the 5-minute countdown."
         countdown 300 180 60
     elif [[ "$PLAYERS" -eq 0 ]]; then
-        echo "[mc] No players online — stopping immediately." >&2
+        log "No players online — skipping the countdown and stopping immediately."
     else
-        echo "[mc] $PLAYERS player(s) online — 5-minute countdown." >&2
+        log "${PLAYERS} player(s) online — triggering the 5-minute countdown."
         countdown 300 180 60
     fi
 
+    log "Sending 'stop' to the server."
     rcon_exec "stop"
+
     # Allow Minecraft time to flush chunks and exit cleanly before systemd
     # sends SIGTERM (TimeoutStopSec in the unit provides the outer bound).
+    log "Waiting 10s for the server to flush chunks and exit."
     sleep 10
+    log "Graceful stop finished; handing back to systemd."
+else
+    # Previously silent, which was the worst case to be silent in: `mc stop` on
+    # a populated server killed everyone with no warning and no explanation,
+    # and the journal showed nothing between "Stopping..." and the SIGTERM.
+    log "RCON unavailable — no in-game warning and no graceful stop; systemd will signal the server directly."
+    log "Install mc-rcon to enable the shutdown countdown."
 fi
