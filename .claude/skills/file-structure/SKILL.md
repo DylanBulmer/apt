@@ -50,7 +50,10 @@ network, no `systemctl`.
 
 > `mc_sprop_get` `load_config` `mc_required_java` `java_major_version`
 > `find_java_binary` `eula_accepted` `mc_rcon_port` `mc_rcon_available`
-> `mc_rcon_call` `generate_rcon_password`
+> `mc_rcon_call` `generate_rcon_password` `mc_say_command`
+
+Broadcasts to players go through `mc_say_command` (a `tellraw`), never `say` —
+`say` renders as "[Rcon] …" when it arrives over RCON.
 
 `server.properties` is the source of truth for the keys the JVM owns
 (`server-port`, `rcon.port`, `enable-rcon`, `rcon.password`). `mc_sprop_get` is

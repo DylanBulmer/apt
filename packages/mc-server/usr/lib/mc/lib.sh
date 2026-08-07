@@ -1410,7 +1410,7 @@ cmd_backup() {
     local was_running=false
     if is_running; then
         was_running=true
-        rcon_command "say [mc] Backup starting — brief lag possible" 2>/dev/null || true
+        rcon_command "$(mc_say_command "[mc] Backup starting — brief lag possible")" 2>/dev/null || true
         rcon_command "save-off"  2>/dev/null || true
         rcon_command "save-all"  2>/dev/null || true
         sleep 3
@@ -1470,7 +1470,7 @@ cmd_backup() {
 
     if $was_running; then
         rcon_command "save-on"  2>/dev/null || true
-        rcon_command "say [mc] Backup complete" 2>/dev/null || true
+        rcon_command "$(mc_say_command "[mc] Backup complete")" 2>/dev/null || true
     fi
 
     local keep="${BACKUP_KEEP:-7}"

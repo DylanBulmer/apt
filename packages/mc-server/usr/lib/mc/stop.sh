@@ -40,8 +40,10 @@ rcon_call() {
     mc_rcon_call "$budget" "$@" 2>/dev/null
 }
 
+# mc_say_command (common.sh) builds a tellraw rather than a `say`, so the
+# countdown does not reach players prefixed with "[Rcon]".
 rcon_say() {
-    rcon_call "$RCON_SAY_TIMEOUT" "say $*" || true
+    rcon_call "$RCON_SAY_TIMEOUT" "$(mc_say_command "$*")" || true
 }
 
 rcon_exec() {

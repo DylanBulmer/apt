@@ -259,6 +259,32 @@ mc_rcon_available() {
     [[ -f "$PASSWD_FILE" ]] && command -v rcon >/dev/null 2>&1
 }
 
+# Build the command that broadcasts $* to every player with no sender prefix.
+#
+# NOT `say`. The server renders `say <msg>` as "[<sender>] <msg>", and for a
+# command arriving over RCON that sender is literally "Rcon" — so
+# `say [Server] Shutting down in 5 minutes.` reached players as
+# "[Rcon] [Server] Shutting down in 5 minutes." tellraw writes a raw chat
+# component instead, which carries no attribution at all.
+#
+# Trade-off worth knowing: `say` is echoed to the server console, and so into
+# the journal, while tellraw is not. Both callers already write their own line
+# to stderr, which is where the journal copy actually comes from — the tier
+# decision in stop.sh and the info() lines in cmd_backup.
+#
+# THE TEXT IS ESCAPED, NOT TRUSTED. Every message today is an internal literal,
+# but this string is interpolated into a JSON document that the server parses
+# and acts on: a bare '"' would close the component early and leave the rest to
+# be read as further JSON.
+mc_say_command() {
+    local msg="$*"
+    msg="${msg//\\/\\\\}"      # backslashes first, or the escaping below doubles up
+    msg="${msg//\"/\\\"}"
+    msg="${msg//$'\n'/ }"      # a component is a single line; a raw newline is invalid JSON
+    msg="${msg//$'\r'/ }"
+    printf 'tellraw @a {"text":"%s"}' "$msg"
+}
+
 # Default wall-clock budget for a single RCON call, in seconds. stop.sh overrides
 # this per call kind (a fire-and-forget chat "say" gets a shorter leash than a
 # "list"/"stop" whose result is acted on); everything else uses this.
