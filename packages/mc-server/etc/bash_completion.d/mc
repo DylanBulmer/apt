@@ -1,4 +1,14 @@
 # bash completion for mc (mc-server / mc-rcon)
+#
+# This lives in /etc/bash_completion.d rather than the modern lazy-loaded
+# /usr/share/bash-completion/completions/ because the bash-completion package
+# already owns the file "completions/mc" (Midnight Commander). The lookup key
+# there is the command name, so there is no non-conflicting filename we could
+# use — two packages shipping a command called "mc" cannot both claim it, and
+# dpkg aborts the unpack rather than let us overwrite it.
+#
+# The compat dir is sourced eagerly at shell start, before anything triggers a
+# dynamic load, so the completion registered here wins for the "mc" command.
 
 _mc() {
     local cur prev words cword

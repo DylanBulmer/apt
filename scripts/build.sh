@@ -79,6 +79,7 @@ done
 
 find "$BUILD_DIR/lib/systemd" -type f            -exec chmod 644 {} \; 2>/dev/null || true
 find "$BUILD_DIR/usr/share"   -type f            -exec chmod 644 {} \; 2>/dev/null || true
+find "$BUILD_DIR/etc"         -type f            -exec chmod 644 {} \; 2>/dev/null || true
 
 dpkg-deb --build --root-owner-group "$BUILD_DIR" "$OUTPUT"
 
