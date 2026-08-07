@@ -3,6 +3,16 @@ Description=Minecraft Server
 After=network.target
 Documentation=https://apt.bulmer.dev
 
+# Bound on Restart=on-failure below. A server that crashes during startup — a
+# broken mod, a corrupt level.dat, an out-of-memory heap size — fails the same
+# way every time, and retrying it every RestartSec forever leaves the unit
+# permanently "activating" while never reaching a state anything can alert on.
+# After 5 failures in an hour systemd stops retrying and the unit sits in
+# `failed`, which is the honest answer. Occasional unrelated crashes stay well
+# inside the window and still recover automatically.
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=minecraft
@@ -61,10 +71,30 @@ TimeoutStartSec=60s
 # Only kill the main process; ExecStop handles the rest.
 KillMode=process
 
-SuccessExitStatus=0 1
+# ── Failure reporting ──────────────────────────────────────────────────────
+# There is deliberately NO SuccessExitStatus= here. It used to read
+# "SuccessExitStatus=0 1", which existed so that start.sh's config refusals
+# (EULA not accepted, and now an unreadable server.properties or a missing
+# server.jar) would not restart-loop. But a JVM that dies of a real fault also
+# exits 1, so the same rule recorded genuine crashes as clean stops: the unit
+# went inactive with Result=success, Restart=on-failure never fired, and
+# `systemctl is-failed minecraft` reported nothing wrong. Anything watching the
+# unit — a monitoring probe, a config-management run, an operator reading
+# `systemctl status` — was told the server had stopped on purpose.
+#
+# start.sh now exits 78 (EX_CONFIG, sysexits(3)) for operator-fixable problems,
+# so the two cases are distinguishable:
+#
+#   exit 0    clean shutdown            → inactive, no restart
+#   exit 78   misconfiguration          → failed, NOT restarted (see below)
+#   anything  crash, OOM-kill, JVM abort → failed, restarted after RestartSec
+#
+# 78 still marks the unit failed, which is the point: the problem is real and
+# should be visible to `systemctl status`. RestartPreventExitStatus is what
+# stops it from looping every 10 s over something no restart can fix.
 Restart=on-failure
 RestartSec=10s
-RestartPreventExitStatus=0
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=multi-user.target

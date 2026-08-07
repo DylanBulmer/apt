@@ -1253,19 +1253,84 @@ cmd_start() {
         info "Server is already running."
         return 0
     fi
-    systemctl start minecraft
+    start_and_verify || return 1
+    info "Server started."
+}
+
+# Start the unit and report what actually happened.
+#
+# Shared by cmd_start and cmd_restart because `systemctl start` on a Type=simple
+# unit returns as soon as the process is forked — not when the server is up. Both
+# commands used to treat that return as success, so a start that refused half a
+# second later still printed a cheerful "Server started."/"Server restarted."
+#
+# Returns 0 only once the server is genuinely running; on failure the reason has
+# already been printed.
+start_and_verify() {
+    # Type=simple rarely fails the start job itself, but when it does (unit
+    # masked, jobs cancelled) `set -e` in bin/mc would otherwise abort here with
+    # no explanation at all.
+    if ! systemctl start minecraft; then
+        error "Server failed to start."
+        report_unit_failure
+        return 1
+    fi
+
     # Wait up to 60 s for the unit to reach active state. Poll at 0.5 s and
     # check *before* the first sleep: the old 5 s-first loop charged a server
     # that was already active a full 5 s of dead time.
     local i
     for (( i=0; i<120; i++ )); do
-        is_running && { info "Server started."; return 0; }
+        # Checked first, and every iteration: start.sh's config refusals exit
+        # within milliseconds of the fork, so the unit can already be failed
+        # here. Nothing about a missing jar or an unaccepted EULA resolves by
+        # waiting, and polling out the full 60 s before saying so buries the
+        # one line that explains it.
+        if start_failed; then
+            error "Server failed to start."
+            report_unit_failure
+            return 1
+        fi
+        is_running && settled_running && return 0
         sleep 0.5
     done
-    is_running && { info "Server started."; return 0; }
+
+    if start_failed; then
+        error "Server failed to start."
+        report_unit_failure
+        return 1
+    fi
+    is_running && return 0
     error "Server did not reach active state within 60 s."
     error "Check logs with: mc logs"
     return 1
+}
+
+# True once the unit has entered a failed state.
+start_failed() {
+    systemctl is-failed --quiet minecraft 2>/dev/null
+}
+
+# Guard against Type=simple's optimism. systemd marks the unit active the moment
+# it forks start.sh, so a bare is_running check can catch the window between the
+# fork and a config refusal exiting — and report "Server started." about a server
+# that is already gone. Re-check after a settle so those exits have landed.
+#
+# Only paid on the transition to active, not on every poll, and only once: a
+# server that clears this is genuinely running, and the 2 s is invisible next to
+# the world load that follows.
+_MC_START_SETTLE=2
+settled_running() {
+    sleep "$_MC_START_SETTLE"
+    ! start_failed && is_running
+}
+
+# Print why the unit failed. start.sh writes its refusals to stderr, which
+# systemd routes to the journal, so the reason is already recorded — surface it
+# here rather than making the operator go and find it.
+report_unit_failure() {
+    journalctl -u minecraft -n 15 --no-pager 2>/dev/null \
+        || error "Check logs with: mc logs"
 }
 
 # ── cmd_stop ───────────────────────────────────────────────────────────────────
@@ -1301,7 +1366,7 @@ cmd_restart() {
     accept_eula "$eula_ok"
     # Stop triggers ExecStop (warnings). Start brings it back up.
     is_running && systemctl stop minecraft
-    systemctl start minecraft
+    start_and_verify || return 1
     info "Server restarted."
 }
 

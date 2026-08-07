@@ -15,6 +15,21 @@ set -euo pipefail
 # Java 25 →                     as experimental in Java 21 and became the ZGC default
 #                               in Java 23, but specifying it is valid on all versions.
 
+# ── Exit codes ─────────────────────────────────────────────────────────────────
+#
+# EX_CONFIG (78, from sysexits(3)) means "an operator has to fix something before
+# this unit can start" — EULA not accepted, unreadable server.properties, missing
+# server.jar. It is distinct from the JVM's own exit codes on purpose.
+#
+# The unit used to carry SuccessExitStatus=0 1, which papered over the two cases
+# with one rule: the gates below exit non-zero, and so does a crashing JVM, so
+# declaring 1 a success silenced BOTH. A server that died of a real fault was
+# recorded as a clean stop, Restart=on-failure never fired, and `systemctl
+# is-failed` stayed quiet. Now the gates use a code of their own, the unit maps
+# it to RestartPreventExitStatus=, and every other non-zero exit is a genuine
+# failure that systemd reports and restarts.
+EX_CONFIG=78
+
 FLAGS_G1GC_JAVA8="\
 -XX:+UseG1GC \
 -XX:+ParallelRefProcEnabled \
@@ -88,7 +103,7 @@ if ! eula_accepted; then
     echo "       https://www.minecraft.net/eula" >&2
     echo "       Accept it with: mc start --accept-eula" >&2
     echo "       or set eula=true in ${SERVER_DIR}/eula.txt" >&2
-    exit 1
+    exit "$EX_CONFIG"
 fi
 
 # ── server.properties access gate ──────────────────────────────────────────────
@@ -110,7 +125,7 @@ if [[ -e "$_MC_SPROPS" ]] && { [[ ! -r "$_MC_SPROPS" ]] || [[ ! -w "$_MC_SPROPS"
     echo "ERROR: ${_MC_SPROPS} is not readable and writable by $(id -un)." >&2
     echo "       The server would silently start on default settings." >&2
     echo "       Fix with: chown ${MC_USER}:${MC_USER} ${_MC_SPROPS} && chmod 640 ${_MC_SPROPS}" >&2
-    exit 1
+    exit "$EX_CONFIG"
 fi
 unset _MC_SPROPS
 
@@ -165,7 +180,8 @@ fi
 
 if [[ ! -f server.jar ]]; then
     echo "ERROR: server.jar not found in $SERVER_DIR" >&2
-    exit 1
+    echo "       Install one with: mc install" >&2
+    exit "$EX_CONFIG"
 fi
 
 # shellcheck disable=SC2086
