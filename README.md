@@ -13,6 +13,7 @@ APT packages by Dylan Bulmer, hosted at
 - [Quick start](#quick-start)
 - [Packages](#packages)
   - [`mc-server`](#mc-server)
+    - [Choosing the world before it exists](#choosing-the-world-before-it-exists)
     - [Repeat runs](#repeat-runs)
     - [Configuration](#configuration)
     - [Backups](#backups)
@@ -24,6 +25,7 @@ APT packages by Dylan Bulmer, hosted at
 - [Security](#security)
 - [Development](#development)
   - [Building packages](#building-packages)
+  - [Running the tests](#running-the-tests)
   - [Adding a package](#adding-a-package)
   - [Publishing to the repo](#publishing-to-the-repo)
   - [CI/CD](#cicd)
@@ -73,6 +75,7 @@ If the fingerprint does not match, stop and remove the keyring file.
 ```bash
 sudo apt install mc-server mc-rcon   # mc-rcon is optional
 sudo mc install --type paper         # prompts for the EULA, then downloads
+sudoedit /opt/minecraft/server.properties   # optional: level-seed, motd, difficulty
 sudo mc start
 mc status
 ```
@@ -140,6 +143,31 @@ package if it is not already present.
 The server runs as the `minecraft` system user under `systemd`. RCON is
 **disabled by default**; install `mc-rcon` to enable it automatically.
 
+#### Choosing the world before it exists
+
+`mc install` leaves you a complete `/opt/minecraft/server.properties` — every
+setting at its default — **without generating the world**. Nothing is created
+until you start the server, so this is the window in which to pick a seed:
+
+```bash
+sudo mc install --type paper --accept-eula --yes
+sudoedit /opt/minecraft/server.properties     # level-seed=..., motd=..., difficulty=...
+sudo mc start                                 # the world is generated from it, now
+```
+
+`level-seed` only matters here. It is consumed when the world is first created
+and has no effect afterwards, so a seed set later is silently ignored — the only
+way to change it on an existing server is to delete the world.
+
+Settings that are *not* world-creation-time (`motd`, `difficulty`, `max-players`,
+…) can be changed whenever you like; restart the server to apply them.
+
+`mc` keeps ownership of four keys in that file — `server-port`, `rcon.port`,
+`enable-rcon` and `rcon.password` — so a modpack cannot enable RCON with a
+password of its choosing. Your `server-port` and `rcon.port` are honoured and
+survive upgrades; `enable-rcon` and `rcon.password` are managed by `mc-rcon`,
+which keeps them in step with `/etc/minecraft/server.passwd`.
+
 #### Repeat runs
 
 Commands are safe to run when their work is already done — useful when `mc` is
@@ -186,7 +214,7 @@ Edit `defaults.conf` to change what a *future* install picks up; edit
 | `SERVER_RAM` | `4G` | On restart — sets both `-Xmx` and `-Xms` |
 | `SERVER_FLAGS` | *(auto)* | On restart — Generational ZGC on Java 21+, Aikar's G1GC on 17 |
 | `JAVA_OPTS` | *(empty)* | On restart — extra JVM options |
-| `SERVER_PORT` | `25565` | At install; also derives the RCON port (`+10`) |
+| `SERVER_PORT` | `25565` | New installs only — seeds `server-port` and `rcon.port` (`+10`) in `server.properties`, which is authoritative from then on |
 | `BACKUP_KEEP` | `7` | Next backup |
 | `BACKUP_SCHEDULE` | `daily` | Next `mc install`/`mc upgrade` — see [Backups](#backups) |
 
@@ -198,9 +226,16 @@ sudo mc restart
 ```
 
 > [!NOTE]
-> `SERVER_PORT` is how `mc` finds the RCON port; the game port itself lives in
-> `/opt/minecraft/server.properties`. If you change one, change the other, or
-> `mc stop` and `mc rcon` will talk to the wrong port.
+> **To change the port on a server that already exists, edit
+> `/opt/minecraft/server.properties`** — `server-port` there is what the server
+> binds, and `mc` reads it back rather than assuming `SERVER_PORT` still applies.
+> `SERVER_PORT` in `server.conf` is only the seed for a server that has no
+> properties file yet; `mc` rewrites it to match on the next command that saves
+> config, so the two converge instead of drifting.
+>
+> The same goes for RCON: `mc` dials whatever `rcon.port` says, falling back to
+> the game port `+10` only when the server has no opinion yet. A hand-set
+> `rcon.port` is honoured and survives upgrades.
 
 #### Backups
 
@@ -334,6 +369,11 @@ five-minute in-game countdown before shutting down, because a JVM killed
 mid-chunk-flush corrupts the world. An empty server stops immediately. The unit
 allows `TimeoutStopSec=375s` for the whole procedure.
 
+The shutdown narrates itself to the journal, so you can tell a countdown from a
+hung connection — `journalctl -u minecraft -f` shows the player count, each
+warning as it is broadcast, and how long the next wait is. If RCON is
+unavailable it says that too, and stops without warning anyone.
+
 **"Could not acquire lock /run/minecraft/mc.lock".** Another `mc` command is
 mutating the server. `mc` reports the holding PID and command; stale locks are
 cleared automatically when the holder is gone.
@@ -394,6 +434,20 @@ Install a build locally to test it:
 sudo dpkg -i dist/mc-server_0.5.0_all.deb
 sudo apt-get install -f     # pull in missing dependencies
 ```
+
+### Running the tests
+
+```bash
+tests/run.sh              # unit + integration      ~30 s, no network
+tests/run.sh --all        # + a real install of every server type (network)
+tests/run.sh unit/ports   # a single suite
+```
+
+Docker is required. `run.sh` builds a Debian image, builds both `.deb` files,
+installs them in a container, and runs the suites against the installed
+packages — so it covers the maintainer scripts and file modes, not just the
+shell functions. See [`tests/README.md`](tests/README.md) for the layout and
+how to add a suite.
 
 ### Adding a package
 
