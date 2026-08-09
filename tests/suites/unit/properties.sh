@@ -10,7 +10,7 @@ eval "$(lib_section 'server.properties helpers' 'Download helpers')"
 sandbox_init
 trap 'rm -rf "$SANDBOX"' EXIT
 MC_USER="$(id -un)"   # chown is tolerated-but-failing as non-root; keep modes observable
-printf 'SERVER_PORT=25565\n' > "$SERVER_CONF"
+: > "$SERVER_CONF"    # exists but says nothing about ports — there is no such setting
 
 section "fresh install, mc-rcon NOT installed"
 rm -f "$PASSWD_FILE" "$MC_BASE/server.properties"
@@ -64,13 +64,15 @@ init_server_properties
 check "enable-rcon false" false "$(mc_sprop_get enable-rcon)"
 echo "s3cret-pw" > "$PASSWD_FILE"        # restore the fixture for the sections below
 
-section "seeds from a non-stock port in server.conf"
+section "a legacy SERVER_PORT in server.conf does not seed the new file"
+# Older installs still carry the line. It must not leak into a freshly created
+# server.properties — the stock port is the only seed.
 rm -f "$MC_BASE/server.properties"
 printf 'SERVER_PORT=25600\n' > "$SERVER_CONF"
 init_server_properties
-check "server-port" 25600 "$(mc_sprop_get server-port)"
-check "rcon.port"   25610 "$(mc_sprop_get rcon.port)"
-printf 'SERVER_PORT=25565\n' > "$SERVER_CONF"
+check "server-port is the stock port" 25565 "$(mc_sprop_get server-port)"
+check "rcon.port derived from it"     25575 "$(mc_sprop_get rcon.port)"
+: > "$SERVER_CONF"
 
 section "managed_property_value does not abort on an absent key"
 # It used to parse with `grep|cut`, whose non-match status (1) propagated

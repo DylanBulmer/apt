@@ -62,10 +62,24 @@ have=$(dpkg-deb -f /dist/mc-server_*.deb Version)
 check "floor is satisfiable by the shipped mc-server" "yes" \
       "$(dpkg --compare-versions "$floor" le "$have" && echo yes || echo no)"
 
-section "every function mc-rcon's postinst borrows actually exists"
+section "every function mc-rcon's maintainer scripts borrow actually exists"
+# They source lib.sh (which pulls in common.sh), so search both. This is the
+# check that actually protects the plugin — the version floor above is only the
+# mechanism that enforces it at install time.
 missing=""
-for fn in $(grep -oE '\b(mc_[a-z_]+|load_config|generate_rcon_password)\b' "$MC_RCON_PKG/DEBIAN/postinst" | sort -u); do
-    grep -qE "^${fn}\(\)" /usr/lib/mc/common.sh || missing="$missing $fn"
+for f in "$MC_RCON_PKG/DEBIAN/postinst" "$MC_RCON_PKG/DEBIAN/prerm"; do
+    for fn in $(grep -oE '\b(mc_[a-z_]+|load_config|generate_rcon_password|ensure_rcon_password|set_rcon_enabled|sprop_[a-z]+|is_running)\b' "$f" | sort -u); do
+        grep -qhE "^${fn}\(\)" /usr/lib/mc/lib.sh /usr/lib/mc/common.sh \
+            || missing="$missing $(basename "$f"):$fn"
+    done
+done
+check "no borrowed function is missing" "" "$missing"
+
+section "the same holds for the rcon subcommand plugin"
+missing=""
+for fn in $(grep -oE '\b(mc_[a-z_]+|load_config|set_rcon_enabled|require_root|require_server|is_running|info|warn|die)\b' \
+            "$MC_RCON_PKG/usr/lib/mc/commands.d/rcon.sh" | sort -u); do
+    grep -qhE "^${fn}\(\)" /usr/lib/mc/lib.sh /usr/lib/mc/common.sh || missing="$missing $fn"
 done
 check "no borrowed function is missing" "" "$missing"
 

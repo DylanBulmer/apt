@@ -50,6 +50,11 @@ _mc() {
         start|restart)
             COMPREPLY=( $(compgen -W "--accept-eula" -- "$cur") )
             ;;
+        rcon)
+            # Provided by mc-rcon. Offered only at the first argument: past that
+            # you are typing a server command, which this cannot know.
+            [[ $cword -eq 2 ]] && COMPREPLY=( $(compgen -W "enable disable status" -- "$cur") )
+            ;;
         restore)
             local backups=()
             if [[ -d /var/backups/minecraft ]]; then

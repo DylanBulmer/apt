@@ -92,7 +92,6 @@ write_config() {
         printf 'MINECRAFT_VERSION=%q\n' "$MINECRAFT_VERSION"
         printf 'JAVA_VERSION=%q\n'      "$JAVA_VERSION"
         printf 'SERVER_RAM=%q\n'        "$SERVER_RAM"
-        printf 'SERVER_PORT=%q\n'       "$SERVER_PORT"
         printf 'BACKUP_KEEP=%q\n'       "$BACKUP_KEEP"
         printf 'BACKUP_SCHEDULE=%q\n'   "$BACKUP_SCHEDULE"
         printf 'JAVA_OPTS=%q\n'         "$JAVA_OPTS"
@@ -393,7 +392,7 @@ set_rcon_enabled() {
 }
 
 # Send a single RCON command. Returns 1 if RCON is not configured or unavailable.
-# load_config first, because the port is derived from SERVER_PORT.
+# load_config first, so MC_RCON_TIMEOUT and the paths are populated.
 #
 # The MC_RCON_TIMEOUT budget matters most on the backup path — save-off/save-all
 # run with the world's saves disabled, so a hang there would leave the server
@@ -490,7 +489,7 @@ managed_property_value() {
     fi
 
     case "$key" in
-        server-port) printf '%s' "${SERVER_PORT:-25565}" ;;
+        server-port) printf '%s' "$MC_STOCK_PORT" ;;
         rcon.port)   printf '%s' "$(mc_rcon_port)" ;;
         enable-rcon)
             # RCON is on only when mc-rcon has generated a password.
@@ -946,7 +945,7 @@ cmd_install_mrpack() {
     #
     # Both callers (cmd_install, cmd_upgrade) already do this, so today the call
     # is redundant — kept because the failure it prevents is disproportionate to
-    # its cost. Without it, SERVER_RAM / SERVER_PORT / BACKUP_KEEP /
+    # its cost. Without it, SERVER_RAM / BACKUP_KEEP /
     # BACKUP_SCHEDULE / JAVA_OPTS are unset and write_config() below aborts
     # under `set -u`, AFTER the pack has been rsynced into MC_BASE — an
     # installed server with no server.conf.
