@@ -536,27 +536,52 @@ verify_sha() {
     info "Verified $(basename "$file") (${algo})"
 }
 
+# PaperMC's v2 API was SUNSET — api.papermc.io/v2 now answers every request with
+# HTTP 410 and {"ok":false,"error":"sunset"}, so `mc install --type paper` failed
+# at the first call with "Failed to fetch Paper version list." This targets the
+# v3 "fill" API, whose shape is different in three ways worth stating:
+#
+#   * .versions is an OBJECT keyed by release family ("26.2": ["26.2","26.2-rc-2"]),
+#     newest family first, newest version first within it — not the flat
+#     oldest-first array v2 returned, so the old `.versions[-1]` has no analogue.
+#   * builds are a bare array, newest first (v2 nested them under .builds and put
+#     newest last).
+#   * each build carries a ready-made download URL on a separate host
+#     (fill-data.papermc.io) rather than a filename to interpolate into the API
+#     path, so the URL is used as given.
 download_paper() {
     local version="$1" dest="$2"
-    local api="https://api.papermc.io/v2/projects/paper"
+    local api="https://fill.papermc.io/v3/projects/paper"
 
     if [[ "$version" == "latest" ]]; then
-        version=$(curl -sf "${api}" | jq -r '.versions[-1]') \
+        version=$(curl -sf "${api}" | jq -r '[.versions[][]][0] // empty') \
             || die "Failed to fetch Paper version list."
+        [[ -n "$version" ]] || die "Failed to determine the latest Paper version."
     fi
 
     local build_info
     build_info=$(curl -sf "${api}/versions/${version}/builds") \
         || die "Failed to fetch Paper builds for $version."
 
-    local build filename checksum
-    build=$(echo "$build_info"    | jq -r '.builds[-1].build')
-    filename=$(echo "$build_info" | jq -r '.builds[-1].downloads.application.name')
-    checksum=$(echo "$build_info" | jq -r '.builds[-1].downloads.application.sha256')
+    # Prefer the newest STABLE build, but fall back to the newest of any channel
+    # so a version that has only experimental builds is still installable — v2
+    # had no channel concept and this function has always taken whatever was
+    # newest.
+    local sel
+    sel=$(echo "$build_info" | jq -c '[.[] | select(.channel == "STABLE")][0] // empty')
+    [[ -n "$sel" ]] || sel=$(echo "$build_info" | jq -c '.[0] // empty')
+    [[ -n "$sel" ]] || die "No Paper builds available for $version."
+
+    local build url checksum
+    build=$(echo    "$sel" | jq -r '.id')
+    url=$(echo      "$sel" | jq -r '.downloads["server:default"].url // empty')
+    checksum=$(echo "$sel" | jq -r '.downloads["server:default"].checksums.sha256 // empty')
+    [[ -n "$url" ]] || die "Paper build ${build} for $version has no server download."
 
     info "Downloading Paper $version build $build..."
-    curl -sf --proto '=https' -o "$dest" \
-        "${api}/versions/${version}/builds/${build}/downloads/${filename}" \
+    # --url, so a URL that ever came back starting with '-' cannot be read by
+    # curl as an option.
+    curl -sf --proto '=https' -o "$dest" --url "$url" \
         || die "Failed to download Paper jar."
 
     verify_sha "$dest" sha256 "$checksum"
@@ -642,9 +667,25 @@ install_neoforge() {
     validate_version "$nf_version" "NeoForge version"
 
     local installer_url="${base}/${nf_version}/neoforge-${nf_version}-installer.jar"
-    local installer_jar
-    installer_jar=$(mktemp --suffix="-neoforge-installer.jar")
-    trap 'rm -f "$installer_jar"' RETURN
+
+    # Staged inside $server_dir rather than a mktemp elsewhere, and deleted
+    # explicitly before this function returns so it is not rsynced into MC_BASE
+    # with the rest of the tree. $server_dir is already registered with the
+    # cleanup registry, so any `die` below removes the installer along with it.
+    #
+    # This used to be `mktemp` plus `trap 'rm -f "$installer_jar"' RETURN`, and
+    # A RETURN TRAP IS NOT SCOPED TO THE FUNCTION THAT SETS IT. It stays armed
+    # and fires a SECOND time when the CALLER returns, at which point the local
+    # is out of scope and `set -u` kills the run with
+    # "installer_jar: unbound variable". While install_neoforge was called
+    # straight from cmd_install that landed after the install had finished and
+    # looked like harmless noise; once install_server_artifact wrapped it, the
+    # second firing aborted the install partway — leaving run.sh and libraries/
+    # in place with no server.conf and no server.properties.
+    #
+    # The cleanup registry above this function exists precisely so call sites do
+    # not hand-roll traps. Use it instead.
+    local installer_jar="${server_dir}/.neoforge-installer.jar"
 
     info "Downloading NeoForge ${nf_version} installer..."
     curl -sf --proto '=https' -o "$installer_jar" "$installer_url" \
@@ -674,6 +715,9 @@ install_neoforge() {
     # Sentinel so start.sh knows to use run.sh instead of server.jar
     touch "${server_dir}/.neoforge"
 
+    # Explicitly, before returning: the caller rsyncs $server_dir into MC_BASE.
+    rm -f "$installer_jar"
+
     RESOLVED_VERSION="$nf_version"
 }
 
@@ -697,8 +741,10 @@ resolve_version() {
 
     case "$type" in
         paper)
-            curl -sf "https://api.papermc.io/v2/projects/paper" 2>/dev/null \
-                | jq -r '.versions[-1] // empty' 2>/dev/null ;;
+            # Mirrors download_paper's resolution against the v3 API; see there
+            # for why .versions is indexed this way rather than with [-1].
+            curl -sf "https://fill.papermc.io/v3/projects/paper" 2>/dev/null \
+                | jq -r '[.versions[][]][0] // empty' 2>/dev/null ;;
         vanilla|fabric)
             curl -sf "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json" 2>/dev/null \
                 | jq -r '.latest.release // empty' 2>/dev/null ;;
@@ -1087,6 +1133,89 @@ install_server_artifact() {
     rm -rf "$staging"
 }
 
+# Materialise a COMPLETE server.properties without generating the world.
+#
+# `--initSettings` is a stock server flag: "Initializes 'server.properties' and
+# 'eula.txt', then quits". It writes out every key at its default and exits
+# before any level is created — which is the only window in which level-seed is
+# still meaningful. The seed is consumed when the world is first generated and
+# is inert from then on, so an operator who wants to choose it has to be given a
+# file to edit BEFORE the first start. init_server_properties() writes only the
+# four keys this package manages, so without this step level-seed and motd do
+# not physically exist in the file until the world already does.
+#
+# Verified against vanilla 26.2: exits 0, leaves an existing eula.txt untouched
+# (so the acceptance accept_eula() recorded survives), preserves every key that
+# already has a value (so the managed server-port/rcon.* survive), produces no
+# world/ directory, and fills the file out to ~69 keys. It also unpacks the
+# bootstrap jar's libraries/ and versions/, so the first real start is quicker.
+#
+# RUNS AS $MC_USER. As root the JVM would create a root-owned server.properties,
+# which the service account can then neither read nor write — the silent failure
+# that makes a server come up on compiled-in defaults and generate a stray world
+# next to the real one. For the same reason the mode is re-asserted afterwards:
+# the JVM writes this file under its own umask, and it carries the RCON
+# password, so it must not be left 0644.
+#
+# A failure here is a warning, not a death. The four-key file is still a working
+# configuration and the server fills in the rest itself on first boot; all that
+# is lost is the chance to pre-set the seed. That matters most for the server
+# types whose launcher this flag is not verified against — Paper is
+# vanilla-derived and should accept it, Fabric delegates to the vanilla Main,
+# and NeoForge's run.sh forwards program arguments, but none of the three are
+# confirmed the way vanilla is.
+initialize_server_settings() {
+    local java_bin="java"
+    if [[ -n "${JAVA_VERSION:-}" ]]; then
+        java_bin=$(find_java_binary "$JAVA_VERSION" 2>/dev/null) || java_bin="java"
+    fi
+
+    info "Writing default server.properties (no world is generated)..."
+
+    # NOTE THE PLACEMENT OF 2>&1 — inside the substitution, not after it.
+    # `out=$(...) 2>&1` redirects the stderr of the *assignment*, which produces
+    # none; the JVM's own stderr then bypasses the capture and prints straight to
+    # the operator's terminal. This step is noisy on the happy path (JNA and
+    # sun.misc.Unsafe deprecation warnings on every run), so that leak turned a
+    # routine install into something that looks like it went wrong — and left
+    # $out empty of the very lines wanted when it really does fail.
+    local out rc=0
+    out=$( {
+        cd "$MC_BASE" || exit 1
+        if [[ -f run.sh ]]; then
+            # NeoForge: run.sh forwards "$@" through to the server.
+            JAVA_HOME=$(dirname "$(dirname "$java_bin")") \
+                runuser -u "$MC_USER" -- bash run.sh --initSettings nogui
+        else
+            runuser -u "$MC_USER" -- "$java_bin" -jar server.jar --initSettings --nogui
+        fi
+    } 2>&1 ) || rc=$?
+
+    # JUDGED ON THE OUTCOME, NOT THE EXIT CODE. NeoForge's FML wrapper exits 1
+    # even when this worked: --initSettings does its job and returns without
+    # ever starting the server thread, so FML logs
+    #
+    #   Initialized '/opt/minecraft/server.properties' and '/opt/minecraft/eula.txt'
+    #   net.neoforged.fml.startup.FatalStartupException: Couldn't find Minecraft
+    #   server thread. Startup likely failed.
+    #
+    # and returns non-zero. Trusting rc there told the operator the seed could
+    # no longer be set, immediately after the file that lets them set it had
+    # been written. level-seed is the key this whole step exists to expose and
+    # nothing else in this package ever writes it, so its presence — the line,
+    # not a value; it is legitimately empty — is the honest test of success.
+    if grep -q '^level-seed=' "$MC_BASE/server.properties" 2>/dev/null; then
+        # The JVM rewrote it under its own umask; restore 0640 minecraft:minecraft.
+        sprop_secure
+        return 0
+    fi
+
+    warn "Could not pre-generate server.properties (exit ${rc})."
+    warn "The server will write its own on first start; level-seed cannot be set after that."
+    printf '%s\n' "$out" | tail -n 5 >&2
+    return 0
+}
+
 # ── cmd_install ────────────────────────────────────────────────────────────────
 
 cmd_install() {
@@ -1130,6 +1259,11 @@ cmd_install() {
 
     if [[ -n "$mrpack_file" ]]; then
         cmd_install_mrpack "$mrpack_file" "$assume_yes"
+        # Safe here without reordering anything: cmd_install_mrpack ends with
+        # its own ensure_java, so the runtime this needs is already present.
+        initialize_server_settings
+        info "Review ${MC_BASE}/server.properties before the first start —"
+        info "the world is generated from it, and level-seed is fixed once it is."
         return
     fi
 
@@ -1144,15 +1278,26 @@ cmd_install() {
         init_server_properties
     fi
 
-    # Last, as in cmd_install_mrpack: this ran BEFORE init_server_properties,
-    # so the file that call creates was left root-owned and the server came up
-    # on defaults. sprop_secure() now covers that file specifically; the order
-    # here is what keeps every *other* root-created file correct too.
+    # Moved ahead of the two steps below, which both need a working JVM:
+    # initialize_server_settings runs the server jar, and it can only do that
+    # once the runtime is installed. This used to be the last thing the function
+    # did, on the reasoning that a missing JRE should not block the download.
+    ensure_java "$JAVA_VERSION" "$assume_yes"
+
+    # Before initialize_server_settings, not after: that step runs the JVM as
+    # $MC_USER and it must be able to write here. This ran BEFORE
+    # init_server_properties once, so the file that call creates was left
+    # root-owned and the server came up on defaults. sprop_secure() now covers
+    # that file specifically; the order here is what keeps every *other*
+    # root-created file correct too.
     chown -R "$MC_USER:$MC_USER" "$MC_BASE"
 
+    initialize_server_settings
+
     info "Installed $SERVER_TYPE $MINECRAFT_VERSION"
-    ensure_java "$JAVA_VERSION" "$assume_yes"
-    info "Enable and start with: systemctl enable --now minecraft"
+    info "Review ${MC_BASE}/server.properties before the first start —"
+    info "the world is generated from it, and level-seed is fixed once it is."
+    info "Then: systemctl enable --now minecraft"
 }
 
 # ── cmd_upgrade ────────────────────────────────────────────────────────────────
@@ -1615,6 +1760,12 @@ Server management:
 
   --accept-eula and --yes are both needed for a fully unattended install
   (cloud-init, Ansible, Docker).
+
+  install writes a complete server.properties WITHOUT generating the world, so
+  level-seed, motd, difficulty and the rest can be set before the first start.
+  The seed is consumed when the world is created and has no effect after that,
+  so edit the file before running 'systemctl enable --now minecraft'. Installing
+  therefore needs a Java runtime present, not just downloaded.
 
 Lifecycle:
   start [--accept-eula]                   Start the server

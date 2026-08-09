@@ -71,7 +71,7 @@ the only parser for them — read through it, never re-grep the file — and
 > *java/eula* `ensure_java` `accept_eula`
 > *systemd/rcon* `is_running` `rcon_command` (availability and password generation are in `common.sh`)
 > *properties* `sprop_secure` `sprop_set` `managed_property_value` `merge_server_properties` `init_server_properties` (reads go through `mc_sprop_get`)
-> *download* `validate_version` `verify_sha` `download_paper` `download_vanilla` `download_fabric` `install_neoforge` `resolve_version` `version_identifies_artifact` `download_jar` `install_server_artifact` (the staging→MC_BASE step shared by install/upgrade)
+> *download* `validate_version` `verify_sha` `download_paper` `download_vanilla` `download_fabric` `install_neoforge` `resolve_version` `version_identifies_artifact` `download_jar` `install_server_artifact` (the staging→MC_BASE step shared by install/upgrade) `initialize_server_settings` (runs the jar with `--initSettings` so server.properties exists, fully populated, before any world does)
 > *mrpack* `mrpack_url_allowed` `make_staging_dir` `mrpack_safe_path` `mrpack_extract_overrides` `cmd_install_mrpack`
 > *start helpers* `start_and_verify` `start_failed` `settled_running` `report_unit_failure`
 > *commands* `cmd_install` `cmd_upgrade` `cmd_start` `cmd_stop` `cmd_restart` `cmd_status` `cmd_backup` `cmd_restore` `cmd_logs` `cmd_delete` `usage`
