@@ -54,7 +54,13 @@ dep=$(dpkg-deb -f /dist/mc-rcon_*.deb Depends)
 check "Depends is version-bounded" "yes" "$([[ "$dep" == *"mc-server (>= "* ]] && echo yes || echo no)"
 floor=$(sed -E 's/.*mc-server \(>= ([^)]*)\).*/\1/' <<<"$dep")
 have=$(dpkg-deb -f /dist/mc-server_*.deb Version)
-check "floor matches the mc-server being shipped" "$have" "$floor"
+# SATISFIABLE, not equal. Demanding equality would force an mc-rcon release for
+# every mc-server release, and would declare a genuinely working pair — an
+# unchanged mc-rcon against a newer mc-server — invalid. What actually matters
+# is the next check: every function the postinst borrows exists in the common.sh
+# being shipped. Raise the floor when that set grows, not on a schedule.
+check "floor is satisfiable by the shipped mc-server" "yes" \
+      "$(dpkg --compare-versions "$floor" le "$have" && echo yes || echo no)"
 
 section "every function mc-rcon's postinst borrows actually exists"
 missing=""
