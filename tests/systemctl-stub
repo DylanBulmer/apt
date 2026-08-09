@@ -1,0 +1,24 @@
+#!/bin/bash
+# Stand-in for systemctl inside the test container.
+#
+# Records every invocation to $SYSTEMCTL_LOG so a suite can assert on what the
+# code *tried* to do — "did the postinst reload the daemon", "did reconfiguring
+# with unchanged settings avoid a restart" — which is most of what matters here.
+#
+# The exit codes are deliberate, not arbitrary:
+#
+#   is-active / is-failed   1 — nothing is running in a container, so is_running()
+#                               and start_failed() answer "no".
+#   is-system-running       1 — reports the system as DEGRADED. This is the state
+#                               that used to make mc-server's postinst skip
+#                               daemon-reload entirely, so the default here keeps
+#                               that path under test rather than testing only the
+#                               healthy case.
+#
+# A suite that needs different answers writes its own stub earlier on PATH.
+echo "$@" >> "${SYSTEMCTL_LOG:-/tmp/systemctl.log}"
+
+case "$1" in
+    is-active|is-failed|is-system-running) exit 1 ;;
+esac
+exit 0

@@ -1,6 +1,6 @@
 ---
 name: file-structure
-description: Map of and exploration guide for the apt.bulmer.dev repo — where every file lives, which file defines which shell function, targeted recipes for finding and reading code without loading whole files, and how to verify shell/packaging changes on a machine that cannot build a .deb. Use BEFORE ls/find/grep when locating code, deciding where a change belongs, or orienting in the mc-server / mc-rcon Debian packages.
+description: Map of and exploration guide for the apt.bulmer.dev repo — where every file lives, which file defines which shell function, targeted recipes for finding and reading code without loading whole files, and where a given kind of change belongs. Use BEFORE ls/find/grep when locating code, deciding where a change belongs, or orienting in the mc-server / mc-rcon Debian packages. For running or writing tests, see the `testing` skill.
 ---
 
 # apt.bulmer.dev structure & exploration
@@ -19,6 +19,7 @@ packages/mc-server/          the CLI, systemd units, config     (Architecture: a
 packages/mc-rcon/            the RCON client                    (compiled C, per-arch)
 scripts/build.sh             builds one .deb; compiles src/ first if present
 scripts/publish.sh           signs a .deb and adds it to reprepro
+tests/run.sh                 regression suite (Docker); see the `testing` skill
 repo/conf/distributions      reprepro config; repo/bulmer.asc is the public key
 .github/workflows/publish.yml  builds per-arch, publishes, ships the nginx image
 k8s/                         deployment of the repo web server
@@ -149,62 +150,22 @@ silently falls back to compiled-in defaults.
 
 ## Verifying changes
 
-**Test in Docker, not on the host.** The `mc-tests:debian13` image (Debian 13,
-bash 5.2, `rsync`/`curl`/`jq`/`unzip`/`gcc`/`dpkg-deb`, plus a `systemctl` stub
-on PATH) runs the real thing end to end — build the `.deb`, install it, drive
-the maintainer scripts. It has an ENTRYPOINT, so override it:
+There is a regression suite: **`tests/run.sh`** (`--all` adds the install-type
+matrix). It builds both `.deb`s, installs them in a Debian 13 container, and
+runs unit + integration suites.
 
-```sh
-docker run --rm --entrypoint bash -v "$PWD":/work:ro mc-tests:debian13 -c '
-  cp -r /work /build && cd /build && rm -rf dist staging
-  bash scripts/build.sh mc-server && bash scripts/build.sh mc-rcon
-  dpkg -i dist/mc-server_*.deb && dpkg -i dist/mc-rcon_*.deb
-  # then: /var/lib/dpkg/info/mc-rcon.postinst configure
-'
-```
+**Read `.claude/skills/testing` before writing a test, running one, or calling a
+change verified.** It covers the fixtures for testing `lib.sh` without
+installing it, why results from a different bash cannot be trusted, what still
+cannot be verified, and a catalogue of bugs this project has hit repeatedly —
+several of which are ways a test can pass *vacuously*.
 
-Copy to `/build` first and mount the repo read-only — `build.sh` writes `dist/`
-and `staging/` and `chmod`s the tree in place.
+Cheap checks that need no container:
 
-**macOS bash is 3.2 and will mislead you.** Two traps specifically:
-
-- `set -e` is *disabled inside* `( ... )` when the subshell is on the left of
-  `||` — including `( ... ) || rc=$?`. A test written that way passes
-  vacuously because the abort it checks for never fires. This is real bash
-  behaviour, not a 3.2 quirk; it bites on 5.2 too. Test an abort path by
-  running a **separate `bash` process** and capturing `$?` with `set +e`
-  around it.
-- `stat -f '%OLp'` (BSD) vs `stat -c '%a'` (GNU) — mode assertions need both.
-
-**Syntax-check everything touched** (fine on the host):
 ```sh
 for f in packages/mc-server/usr/lib/mc/*.sh packages/mc-server/usr/bin/mc \
          packages/mc-server/DEBIAN/postinst; do bash -n "$f" && echo "OK $f"; done
 ```
-
-**Lint** with `shellcheck -s bash -S warning -e SC1091`. `SC2034` "appears
-unused" fires constantly on `common.sh` — those globals are consumed by
-`lib.sh`/`start.sh` and the warning is a false positive across file boundaries.
-A hit on a *colour code* or a helper nothing sources, though, is real dead code.
-
-**Exercise a helper in a sandbox** by sourcing just its section and overriding
-the path globals — most of `lib.sh` is testable unprivileged this way. `chown`
-failures are tolerated by design, so only modes are observable as non-root:
-```sh
-eval "$(sed -n '/^# ── server.properties helpers/,/^# ── Download helpers/p' lib.sh)"
-MC_BASE=/tmp/sandbox   # then call init_server_properties, merge_server_properties, ...
-```
-
-**Test systemd-facing logic with mocked `systemctl`/`journalctl`** — shell
-functions shadow real commands, so state machines like `start_and_verify` can be
-driven through failure, success, and race cases without systemd present. (The
-container's `systemctl` stub echoes its arguments, which is enough to assert
-*whether* a restart was triggered — e.g. that a no-op reconfigure does not
-restart a populated server.)
-
-Still unverifiable, even in the container: `systemd-analyze verify` on the unit
-(no running systemd, only the stub) and anything needing a real JVM or a real
-Minecraft server. Say so rather than implying it was tested.
 
 ## Shipping
 
