@@ -323,6 +323,75 @@ is_running() {
 
 # ── RCON helpers ───────────────────────────────────────────────────────────────
 
+# Provision the RCON password when mc-rcon is installed but the file is absent.
+#
+# THIS FILE HAD EXACTLY ONE WRITER: mc-rcon's postinst — and that bails out
+# early when no server exists yet:
+#
+#     [[ -f "$SERVER_CONF" ]] || exit 0
+#
+# So installing the plugin *before* creating a server, which is the order the
+# README's quick start documents, provisioned nothing: the postinst declined,
+# `mc install` had no password to find, and enable-rcon was written false on a
+# machine with mc-rcon installed. `mc delete` (which removes the password along
+# with the rest of the server's secrets) followed by a fresh `mc install` landed
+# in the same state. Neither was recoverable through the CLI, because nothing in
+# it ever created this file — only reinstalling mc-rcon did.
+#
+# Owner and mode match what the postinst writes: root:$MC_USER 0640, so the
+# service account can read the secret and nobody else can. The umask covers the
+# window between creation and the chmod.
+ensure_rcon_password() {
+    # No client, no RCON. Same signal mc_rcon_available() uses, and it keeps a
+    # server without the plugin from being handed a password it cannot use.
+    command -v rcon >/dev/null 2>&1 || return 0
+    [[ -f "$PASSWD_FILE" ]] && return 0
+
+    mkdir -p "$MC_CONFIG"
+    (umask 077; generate_rcon_password > "$PASSWD_FILE")
+    chown "root:$MC_USER" "$PASSWD_FILE" 2>/dev/null || true
+    chmod 640 "$PASSWD_FILE"
+    info "Generated an RCON password in ${PASSWD_FILE}."
+}
+
+# Bring the RCON block of server.properties to the requested state.
+#   $1  true | false
+#
+# THE ONE WRITER of enable-rcon / rcon.port / rcon.password. `mc rcon
+# enable|disable` and both of mc-rcon's maintainer scripts route through here;
+# the maintainer scripts used to carry their own `sed -i` copies, which is how
+# they drifted apart and how a '|' in a value would have ended the sed
+# expression early.
+#
+# RETURNS 0 IF SOMETHING CHANGED, 1 IF THE FILE ALREADY SAID THIS. Callers use
+# that to decide whether a restart is warranted — restarting a populated server
+# costs the full stop.sh countdown, so a no-op reconfigure must not trigger one.
+set_rcon_enabled() {
+    local want="$1"
+    local password="" changed=1 kv key val
+
+    if [[ "$want" == "true" ]]; then
+        ensure_rcon_password
+        # No password means no client installed, so there is nothing to enable
+        # and no secret to write. Leave the file alone rather than turning on a
+        # listener nobody can talk to.
+        [[ -f "$PASSWD_FILE" ]] || return 1
+        password=$(cat "$PASSWD_FILE")
+    fi
+
+    # mc_rcon_port() reads the live rcon.port first, so a port the operator
+    # chose is re-asserted as itself and counts as unchanged.
+    for kv in "enable-rcon=$want" "rcon.port=$(mc_rcon_port)" "rcon.password=$password"; do
+        key="${kv%%=*}"; val="${kv#*=}"
+        if [[ "$(mc_sprop_get "$key")" != "$val" ]]; then
+            sprop_set "$key" "$val"
+            changed=0
+        fi
+    done
+
+    return "$changed"
+}
+
 # Send a single RCON command. Returns 1 if RCON is not configured or unavailable.
 # load_config first, because the port is derived from SERVER_PORT.
 #
@@ -1256,6 +1325,11 @@ cmd_install() {
     # server jar and mods only to refuse the licence afterwards. Covers the
     # mrpack branch below too.
     accept_eula "$eula_ok"
+
+    # Ahead of BOTH install paths below: init_server_properties and
+    # merge_server_properties each derive enable-rcon and rcon.password from
+    # whether this file exists, so it has to exist before either runs.
+    ensure_rcon_password
 
     if [[ -n "$mrpack_file" ]]; then
         cmd_install_mrpack "$mrpack_file" "$assume_yes"

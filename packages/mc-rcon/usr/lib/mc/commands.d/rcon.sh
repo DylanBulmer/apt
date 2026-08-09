@@ -6,6 +6,30 @@
 mc_register_command rcon
 
 cmd_rcon() {
+    # ── State verbs ────────────────────────────────────────────────────────
+    # enable/disable/status act on server.properties rather than talking to a
+    # running server, so they are handled before the connection is set up — you
+    # must be able to enable RCON on a server that is stopped, or on one where
+    # RCON is precisely what is currently off.
+    #
+    # They shadow any server command of the same name. None exist today, and
+    # `mc rcon -- <command>` sends one literally if that ever changes.
+    case "${1:-}" in
+        enable|disable|status)
+            local verb="$1"; shift
+            [[ $# -eq 0 ]] || die "mc rcon ${verb} takes no arguments."
+            # Reading and writing server.properties both need root: it is 0640
+            # and owned by the service account precisely so that it is not
+            # world-readable — it carries the RCON password.
+            require_root
+            require_server
+            load_config
+            cmd_rcon_"$verb"
+            return
+            ;;
+        --) shift ;;
+    esac
+
     require_server
 
     # is_running() asks systemd, which fails fast with a clear message under
@@ -18,7 +42,7 @@ cmd_rcon() {
         is_running || die "Server is not running."
     fi
 
-    [[ -f "$PASSWD_FILE" ]] || die "RCON is not enabled. Install mc-rcon first, then run: mc install"
+    [[ -f "$PASSWD_FILE" ]] || die "RCON is not enabled. Run: mc rcon enable"
 
     load_config
     local port
@@ -31,4 +55,61 @@ cmd_rcon() {
     # Pass the password by file so it never appears in argv (/proc/<pid>/cmdline)
     # or in a shell variable. With no extra args, rcon opens an interactive session.
     exec rcon --password-file "$PASSWD_FILE" 127.0.0.1 "$port" "$@"
+}
+
+# Turn RCON on. set_rcon_enabled() (mc-server) provisions the password if it is
+# missing and writes the three managed keys; it reports whether anything moved.
+cmd_rcon_enable() {
+    if set_rcon_enabled true; then
+        info "RCON enabled on port $(mc_rcon_port)."
+        # NOT restarted automatically. The server reads server.properties at
+        # startup, so a restart is required — but on a populated server that is
+        # a five-minute countdown, and choosing when to spend it is the
+        # operator's call, not a side effect of a config command.
+        if is_running; then
+            info "Restart to apply: mc restart"
+        fi
+    else
+        info "RCON is already enabled on port $(mc_rcon_port)."
+    fi
+}
+
+# Turn RCON off, clearing the password out of server.properties. The password
+# file itself is left alone, so `mc rcon enable` restores the same secret rather
+# than inventing a new one every time it is toggled.
+cmd_rcon_disable() {
+    if set_rcon_enabled false; then
+        info "RCON disabled."
+        if is_running; then
+            info "Restart to apply: mc restart"
+        fi
+    else
+        info "RCON is already disabled."
+    fi
+}
+
+cmd_rcon_status() {
+    local enabled port
+    enabled=$(mc_sprop_get enable-rcon)
+    port=$(mc_rcon_port)
+
+    info "enable-rcon: ${enabled:-unset} (port ${port})"
+
+    if [[ ! -f "$PASSWD_FILE" ]]; then
+        warn "No password file at ${PASSWD_FILE} — run: mc rcon enable"
+    elif [[ "$(mc_sprop_get rcon.password)" != "$(cat "$PASSWD_FILE")" ]]; then
+        # The two drift apart if server.properties was edited by hand or
+        # restored from a backup taken before the password was provisioned.
+        warn "server.properties disagrees with ${PASSWD_FILE} — run: mc rcon enable"
+    fi
+
+    if [[ "$enabled" == "true" ]] && is_running; then
+        # Proves the whole path end to end: password, port, and a listening
+        # server — rather than just what the file claims.
+        if mc_rcon_call 5 list >/dev/null 2>&1; then
+            info "Connection: OK"
+        else
+            warn "Connection: FAILED — the server may need a restart to pick up the settings."
+        fi
+    fi
 }

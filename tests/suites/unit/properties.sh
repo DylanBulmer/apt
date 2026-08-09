@@ -3,6 +3,8 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../../lib/assert.sh"
 source "$MC_COMMON"
+eval "$(lib_section 'Output helpers'            'Plugin command registry')"
+eval "$(lib_section 'RCON helpers'              'server.properties helpers')"
 eval "$(lib_section 'server.properties helpers' 'Download helpers')"
 
 sandbox_init
@@ -26,6 +28,41 @@ echo "s3cret-pw" > "$PASSWD_FILE"
 init_server_properties
 check "enable-rcon now true" true      "$(mc_sprop_get enable-rcon)"
 check "password seeded"      s3cret-pw "$(mc_sprop_get rcon.password)"
+
+section "RCON is provisioned when mc-rcon is present but the password is not"
+# mc-rcon's postinst is the only other writer of this file and it bails out when
+# no server exists yet, so `apt install mc-rcon` before `mc install` — and
+# `mc delete` followed by `mc install` — used to leave RCON off on a machine
+# with the plugin installed.
+FAKEBIN="$SANDBOX/bin"; mkdir -p "$FAKEBIN"
+printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/rcon"; chmod 755 "$FAKEBIN/rcon"
+
+rm -f "$PASSWD_FILE" "$MC_BASE/server.properties"
+PATH="$FAKEBIN:$PATH" ensure_rcon_password >/dev/null
+check "password generated"   yes "$([[ -s "$PASSWD_FILE" ]] && echo yes)"
+check "mode 0640"            640 "$(file_mode "$PASSWD_FILE")"
+check "base64url charset"    ok  "$(grep -qE '^[A-Za-z0-9_-]+$' "$PASSWD_FILE" && echo ok)"
+init_server_properties
+check "enable-rcon true"     true "$(mc_sprop_get enable-rcon)"
+check "password matches file" "$(cat "$PASSWD_FILE")" "$(mc_sprop_get rcon.password)"
+
+section "an existing password is never regenerated"
+before=$(cat "$PASSWD_FILE")
+PATH="$FAKEBIN:$PATH" ensure_rcon_password >/dev/null
+check "unchanged" "$before" "$(cat "$PASSWD_FILE")"
+
+section "without mc-rcon installed, no password is invented"
+# PATH is emptied for this ONE call rather than just dropping the fake: run.sh
+# installs both packages before every suite, so the real /usr/bin/rcon is on
+# PATH and "mc-rcon absent" has to be simulated deliberately. `command -v` is a
+# builtin, and the function returns before it needs any external command.
+rm -f "$PASSWD_FILE" "$MC_BASE/server.properties"
+mkdir -p "$SANDBOX/empty"
+PATH="$SANDBOX/empty" ensure_rcon_password >/dev/null
+check "no password file" absent "$([[ -f "$PASSWD_FILE" ]] && echo present || echo absent)"
+init_server_properties
+check "enable-rcon false" false "$(mc_sprop_get enable-rcon)"
+echo "s3cret-pw" > "$PASSWD_FILE"        # restore the fixture for the sections below
 
 section "seeds from a non-stock port in server.conf"
 rm -f "$MC_BASE/server.properties"

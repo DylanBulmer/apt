@@ -2,23 +2,32 @@
 # When mc-rcon is removed, disable RCON in server.properties.
 set -e
 
-SERVER_DIR="/opt/minecraft"
-MC_USER="minecraft"
+LIB_SH="/usr/lib/mc/lib.sh"
 
 case "$1" in
     remove|purge)
-        PROPS="$SERVER_DIR/server.properties"
-        if [[ -f "$PROPS" ]]; then
-            sed -i "s|^enable-rcon=.*|enable-rcon=false|" "$PROPS"
-            sed -i "s|^rcon.password=.*|rcon.password=|" "$PROPS"
-            chown "$MC_USER:$MC_USER" "$PROPS"
-        fi
+        # mc-server is a dependency, so it is still installed while this runs —
+        # dpkg removes dependents before what they depend on. Guarded anyway,
+        # because a prerm that dies takes the removal down with it.
+        [[ -r "$LIB_SH" ]] || exit 0
+        # shellcheck source=/usr/lib/mc/lib.sh
+        source "$LIB_SH"
 
-        # Restart server if running so the change takes effect
-        if command -v systemctl &>/dev/null \
-                && systemctl is-active --quiet minecraft 2>/dev/null; then
-            echo "mc-rcon: restarting minecraft service to disable RCON..."
-            systemctl restart minecraft || true
+        [[ -f "$MC_BASE/server.properties" ]] || exit 0
+        load_config
+
+        # set_rcon_enabled false clears rcon.password out of server.properties
+        # as well. The password FILE is deliberately left in place: reinstalling
+        # mc-rcon then restores the same secret instead of inventing a new one,
+        # and it is root:minecraft 0640, not something a removed package leaks.
+        #
+        # Same restart discipline as the postinst — only when a value moved.
+        if set_rcon_enabled false; then
+            if command -v systemctl >/dev/null 2>&1 \
+                    && systemctl is-active --quiet minecraft 2>/dev/null; then
+                echo "mc-rcon: restarting minecraft service to disable RCON..."
+                systemctl restart minecraft || true
+            fi
         fi
         ;;
 esac

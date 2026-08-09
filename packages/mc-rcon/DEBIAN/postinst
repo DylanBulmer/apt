@@ -1,100 +1,54 @@
 #!/bin/bash
-# When mc-rcon is installed, automatically enable RCON for the managed server.
-# Generates a password if one does not already exist.
+# When mc-rcon is installed, make sure the RCON password exists and enable RCON
+# on the managed server.
 set -e
 
-COMMON_SH="/usr/lib/mc/common.sh"
+LIB_SH="/usr/lib/mc/lib.sh"
 
 case "$1" in
     configure)
-        # Paths, load_config(), mc_rcon_port(), mc_sprop_get() and
-        # generate_rcon_password() all come from mc-server. Sourcing them rather
-        # than restating the paths and the port convention here is what keeps
-        # this script from drifting away from the CLI: the port arithmetic below
-        # used to live in both places, and only one of them was ever updated.
+        # Everything below comes from mc-server, which Depends: guarantees is
+        # unpacked and configured before this runs. Sourcing it rather than
+        # restating the paths, the port convention and the property writes is
+        # what keeps this script from drifting away from the CLI — it used to
+        # carry its own `sed -i` copies of all three, and only one of them was
+        # ever updated.
         #
         # THE VERSIONED Depends: IN control IS LOAD-BEARING, not decoration.
         # This file calls shell functions out of another package's private
         # library, so "mc-server is installed" is not a strong enough claim —
-        # it has to be a version whose common.sh actually defines them.
+        # it has to be a version whose library actually defines them.
         # Unversioned, dpkg happily configured this against an older mc-server
         # and the script died with `generate_rcon_password: command not found`
         # (exit 127), leaving mc-rcon half-installed and apt in an error state.
         # Raise the floor in control whenever this script starts using a
         # function that mc-server did not previously export.
-        [[ -r "$COMMON_SH" ]] || exit 0
-        # shellcheck source=/usr/lib/mc/common.sh
-        source "$COMMON_SH"
+        [[ -r "$LIB_SH" ]] || exit 0
+        # shellcheck source=/usr/lib/mc/lib.sh
+        source "$LIB_SH"
 
-        # Nothing to do unless a server has actually been installed.
+        # Unconditional, and ahead of the server check: the password should
+        # exist from the moment the client is installed, whether or not a server
+        # has been created yet. `mc install` calls this too, so a server created
+        # later is provisioned either way.
+        ensure_rcon_password
+
+        # No server yet — nothing to enable on. mc install applies the rest.
         [[ -f "$SERVER_CONF" ]] || exit 0
 
         load_config
 
-        # The port the server actually binds, not an assumption about it.
-        # mc_rcon_port() prefers rcon.port from server.properties and applies
-        # the +10 convention only when the server has no opinion yet, so a
-        # hand-set or modpack-set rcon.port survives this upgrade. It used to be
-        # recomputed as SERVER_PORT+10 and written back unconditionally, which
-        # reset such a server to a port the JVM was not listening on — and, as
-        # a bonus, restarted the server to do it.
-        RCON_PORT=$(mc_rcon_port)
-
-        # Generate password if not present
-        if [[ ! -f "$PASSWD_FILE" ]]; then
-            generate_rcon_password > "$PASSWD_FILE"
-            chmod 640 "$PASSWD_FILE"
-            chown root:"$MC_USER" "$PASSWD_FILE"
-        fi
-
-        PASSWORD=$(cat "$PASSWD_FILE")
-
-        # Enable RCON in server.properties
-        PROPS="$MC_BASE/server.properties"
-        SETTINGS_CHANGED=no
-        if [[ -f "$PROPS" ]]; then
-            # Set a property to a value, reporting whether it actually moved.
-            # The restart below is gated on this: reconfiguring a server that
-            # already has these exact values is pure downtime, and on a
-            # populated server stop.sh spends five minutes counting players
-            # down before it goes. An unattended `apt upgrade` that happens to
-            # pull a new mc-rcon must not cost that for a no-op.
-            set_prop() {
-                local key="$1" value="$2" current
-                # Read through mc_sprop_get so this agrees with the CLI on what
-                # a key's current value is — in particular on escaping the '.'
-                # in rcon.port / rcon.password, which an unescaped pattern
-                # treats as "any character".
-                if grep -q -- "^${key//./\\.}=" "$PROPS"; then
-                    current=$(mc_sprop_get "$key" "$PROPS")
-                    [[ "$current" == "$value" ]] && return 0
-                    # '|' is the sed delimiter here and the password charset is
-                    # base64url (A-Za-z0-9-_), so no value reaching this can
-                    # contain one. Ports and 'true' are likewise safe.
-                    sed -i "s|^${key//./\\.}=.*|${key}=${value}|" "$PROPS"
-                else
-                    echo "${key}=${value}" >> "$PROPS"
-                fi
-                SETTINGS_CHANGED=yes
-            }
-
-            set_prop enable-rcon   "true"
-            set_prop rcon.port     "$RCON_PORT"
-            set_prop rcon.password "$PASSWORD"
-
-            chown "$MC_USER:$MC_USER" "$PROPS"
-            # This file now holds the RCON password. 0644 (the default from the
-            # umask under which it was created) exposed that secret to every
-            # local user, who could then drive the server console over loopback.
-            chmod 640 "$PROPS"
-        fi
-
-        # Restart only if something above actually changed — see set_prop.
-        if [[ "$SETTINGS_CHANGED" == "yes" ]] \
-                && command -v systemctl &>/dev/null \
-                && systemctl is-active --quiet minecraft 2>/dev/null; then
-            echo "mc-rcon: restarting minecraft service to apply RCON settings..."
-            systemctl restart minecraft || true
+        # Restart only if something actually moved. Reconfiguring a server that
+        # already has these exact values is pure downtime, and on a populated
+        # server stop.sh spends five minutes counting players down before it
+        # goes. An unattended `apt upgrade` that happens to pull a new mc-rcon
+        # must not cost that for a no-op.
+        if set_rcon_enabled true; then
+            if command -v systemctl >/dev/null 2>&1 \
+                    && systemctl is-active --quiet minecraft 2>/dev/null; then
+                echo "mc-rcon: restarting minecraft service to apply RCON settings..."
+                systemctl restart minecraft || true
+            fi
         fi
         ;;
 esac
