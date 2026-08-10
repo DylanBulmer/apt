@@ -416,19 +416,28 @@ static int rcon_auth(int fd, const char *password)
  * its own reply — every subsequent response in an interactive session would be
  * shifted by one, which is far worse than plain truncation.
  *
- * The standard fix is a sentinel packet: right after the real command we send a
- * second, empty RCON_EXEC packet carrying a different request id. Servers
- * process and answer requests strictly in order, so the reply tagged
- * ID_SENTINEL cannot arrive before the final fragment of the real response.
- * Everything received up to that point is the command's output; the sentinel's
- * own reply is discarded and the socket is left correctly positioned for the
- * next command.
+ * The standard fix is a sentinel packet: an empty RCON_EXEC packet carrying a
+ * different request id. Servers process and answer requests strictly in order,
+ * so the reply tagged ID_SENTINEL cannot arrive before the final fragment of
+ * the real response. Everything received up to that point is the command's
+ * output; the sentinel's own reply is discarded and the socket is left
+ * correctly positioned for the next command.
+ *
+ * The sentinel is held back until the first response packet is in hand, and
+ * that ordering is load-bearing. Minecraft's RCON server does one read() per
+ * loop iteration and requires the bytes it got to be exactly one packet
+ * (`length != bytes_read - 4` makes it drop the connection). Writing the
+ * command and the sentinel back to back puts both on the wire fast enough that
+ * TCP hands the server a single segment holding both, and it hangs up — the
+ * session dies partway through, typically on the second command an operator
+ * types. Waiting for the response forces a full round trip between the two
+ * packets, so each arrives in a read() of its own.
  */
 static char *rcon_exec_inner(int fd, const char *cmd)
 {
-    if (pkt_send(fd, ID_CMD,      RCON_EXEC, cmd) < 0) return NULL;
-    if (pkt_send(fd, ID_SENTINEL, RCON_EXEC, "")  < 0) return NULL;
+    if (pkt_send(fd, ID_CMD, RCON_EXEC, cmd) < 0) return NULL;
 
+    int    sentinel_sent = 0;
     char  *buf = NULL;   /* accumulated payloads; NUL-terminated on success */
     size_t len = 0;      /* bytes used in buf, excluding the terminator */
     size_t cap = 0;      /* bytes allocated for buf */
@@ -447,6 +456,20 @@ static char *rcon_exec_inner(int fd, const char *cmd)
         if (pkt_recv(fd, &id, &type, &payload, &plen) < 0) {
             free(buf);
             return NULL;
+        }
+
+        /* The command has been answered, so the server is back in its read
+         * loop with an empty socket buffer — the sentinel can go out now
+         * without landing in the same segment as anything else. Continuation
+         * fragments already queued behind this packet still precede the
+         * sentinel's reply, because the server answers requests in order. */
+        if (!sentinel_sent) {
+            if (pkt_send(fd, ID_SENTINEL, RCON_EXEC, "") < 0) {
+                free(payload);
+                free(buf);
+                return NULL;
+            }
+            sentinel_sent = 1;
         }
 
         if (id == ID_SENTINEL) {

@@ -312,17 +312,20 @@ sudo apt install mc-rcon
 ```
 
 ```
-mc rcon                    Open an interactive RCON session
-mc rcon <command>          Run a single command and print the response
-mc rcon enable             Turn RCON on in server.properties
-mc rcon disable            Turn RCON off
-mc rcon status             Show whether RCON is on, on which port, and whether it answers
+sudo mc rcon               Open an interactive RCON session
+sudo mc rcon <command>     Run a single command and print the response
+sudo mc rcon enable        Turn RCON on in server.properties
+sudo mc rcon disable       Turn RCON off
+sudo mc rcon status        Show whether RCON is on, on which port, and whether it answers
 ```
+
+Every form needs root: the password lives in `/etc/minecraft/server.passwd`
+(`0640`, `root:minecraft`) and the port in `server.properties` (`0640`, owned by
+the service account), and neither is readable by an ordinary user.
 
 `enable`, `disable` and `status` act on `server.properties` rather than talking
 to the server, so they work while it is stopped — and while RCON is precisely
-what is currently off. They require root, because that file is `0640` and owned
-by the service account. The server reads it at startup, so `mc restart` is
+what is currently off. The server reads that file at startup, so `mc restart` is
 needed to apply a change; `mc` tells you when that is the case rather than
 restarting a populated server on your behalf.
 

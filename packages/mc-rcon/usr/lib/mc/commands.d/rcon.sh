@@ -30,6 +30,14 @@ cmd_rcon() {
         --) shift ;;
     esac
 
+    # Root first, and before require_server: everything this path touches is
+    # closed to an ordinary user — MC_BASE is 0750 minecraft:minecraft, the
+    # password file is 0640 root:minecraft, and server.properties (which carries
+    # the port) is 0640 minecraft:minecraft. Checking server_installed first
+    # would fail its -f test purely because the directory is unreadable and
+    # report "No server installed" to a user whose server is installed and
+    # running.
+    require_root
     require_server
 
     # is_running() asks systemd, which fails fast with a clear message under
