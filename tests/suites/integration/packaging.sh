@@ -14,9 +14,9 @@ check "stop.sh"   "755" "$(file_mode /usr/lib/mc/stop.sh)"
 check "mc"        "755" "$(file_mode /usr/bin/mc)"
 
 section "postinst reloads systemd even on a DEGRADED system"
-# The stub reports is-system-running as degraded. That used to be gated on as if
-# it meant "systemd is absent", so a box with any unrelated failed unit silently
-# skipped daemon-reload and never picked up the new unit file.
+# The stub reports is-system-running as degraded — the state of any box with an
+# unrelated failed unit. Treating that as "systemd is absent" would skip the
+# reload and leave the new unit file unread.
 mkdir -p /run/systemd/system
 export SYSTEMCTL_LOG=/tmp/sc-degraded.log; : > $SYSTEMCTL_LOG
 dpkg -i /dist/mc-server_*.deb >/dev/null 2>&1
@@ -46,10 +46,10 @@ check_lacks "unchanged -> no reload"     /tmp/wc2.log "daemon-reload"
 check_has   "schedule moved -> reload"   /tmp/wc3.log "daemon-reload"
 
 section "mc-rcon declares a VERSIONED dependency on mc-server"
-# Its postinst calls shell functions out of mc-server's common.sh, so
-# "mc-server is installed" is not a strong enough claim. Unversioned, dpkg
-# configured it against an older library and the script died with
-# "generate_rcon_password: command not found" (exit 127).
+# Its maintainer scripts call shell functions out of mc-server's private
+# library, so "mc-server is installed" is not a strong enough claim —
+# unversioned, dpkg may configure them against a library that lacks the
+# functions and the script dies with "command not found" (exit 127).
 dep=$(dpkg-deb -f /dist/mc-rcon_*.deb Depends)
 check "Depends is version-bounded" "yes" "$([[ "$dep" == *"mc-server (>= "* ]] && echo yes || echo no)"
 floor=$(sed -E 's/.*mc-server \(>= ([^)]*)\).*/\1/' <<<"$dep")

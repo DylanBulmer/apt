@@ -72,18 +72,14 @@ TimeoutStartSec=60s
 KillMode=process
 
 # ── Failure reporting ──────────────────────────────────────────────────────
-# There is deliberately NO SuccessExitStatus= here. It used to read
-# "SuccessExitStatus=0 1", which existed so that start.sh's config refusals
-# (EULA not accepted, and now an unreadable server.properties or a missing
-# server.jar) would not restart-loop. But a JVM that dies of a real fault also
-# exits 1, so the same rule recorded genuine crashes as clean stops: the unit
-# went inactive with Result=success, Restart=on-failure never fired, and
-# `systemctl is-failed minecraft` reported nothing wrong. Anything watching the
-# unit — a monitoring probe, a config-management run, an operator reading
-# `systemctl status` — was told the server had stopped on purpose.
+# There is deliberately NO SuccessExitStatus= here. Declaring an exit code a
+# success to stop start.sh's config refusals from restart-looping would silence
+# genuine crashes with it — a JVM that dies of a real fault exits non-zero too,
+# and the unit would go inactive with Result=success while Restart=on-failure
+# never fired. Anything watching would be told the server stopped on purpose.
 #
-# start.sh now exits 78 (EX_CONFIG, sysexits(3)) for operator-fixable problems,
-# so the two cases are distinguishable:
+# start.sh instead exits 78 (EX_CONFIG, sysexits(3)) for operator-fixable
+# problems, which keeps the two cases distinguishable:
 #
 #   exit 0    clean shutdown            → inactive, no restart
 #   exit 78   misconfiguration          → failed, NOT restarted (see below)

@@ -8,21 +8,18 @@ LIB_SH="/usr/lib/mc/lib.sh"
 case "$1" in
     configure)
         # Everything below comes from mc-server, which Depends: guarantees is
-        # unpacked and configured before this runs. Sourcing it rather than
-        # restating the paths, the port convention and the property writes is
-        # what keeps this script from drifting away from the CLI — it used to
-        # carry its own `sed -i` copies of all three, and only one of them was
-        # ever updated.
+        # unpacked and configured before this runs. Sourcing it, rather than
+        # restating the paths and the property writes, is what keeps this script
+        # from drifting away from the CLI.
         #
         # THE VERSIONED Depends: IN control IS LOAD-BEARING, not decoration.
         # This file calls shell functions out of another package's private
-        # library, so "mc-server is installed" is not a strong enough claim —
-        # it has to be a version whose library actually defines them.
-        # Unversioned, dpkg happily configured this against an older mc-server
-        # and the script died with `generate_rcon_password: command not found`
-        # (exit 127), leaving mc-rcon half-installed and apt in an error state.
-        # Raise the floor in control whenever this script starts using a
-        # function that mc-server did not previously export.
+        # library, so "mc-server is installed" is not a strong enough claim — it
+        # has to be a version whose library defines them, or dpkg configures
+        # this against an older one and the script dies with `command not found`
+        # (exit 127), leaving mc-rcon half-installed. Raise the floor whenever
+        # this script starts using a function that older mc-server versions do
+        # not export.
         [[ -r "$LIB_SH" ]] || exit 0
         # shellcheck source=/usr/lib/mc/lib.sh
         source "$LIB_SH"

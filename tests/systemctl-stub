@@ -9,11 +9,10 @@
 #
 #   is-active / is-failed   1 — nothing is running in a container, so is_running()
 #                               and start_failed() answer "no".
-#   is-system-running       1 — reports the system as DEGRADED. This is the state
-#                               that used to make mc-server's postinst skip
-#                               daemon-reload entirely, so the default here keeps
-#                               that path under test rather than testing only the
-#                               healthy case.
+#   is-system-running       1 — reports the system as DEGRADED, the state of any
+#                               machine with a failed unit. Defaulting to it
+#                               keeps maintainer scripts under test in the
+#                               awkward case rather than only the healthy one.
 #
 # A suite that needs different answers writes its own stub earlier on PATH.
 echo "$@" >> "${SYSTEMCTL_LOG:-/tmp/systemctl.log}"

@@ -197,11 +197,22 @@ or `mc install --force` to deliberately reinstall over the top.
 
 #### Configuration
 
-Two files, layered. `/etc/minecraft/defaults.conf` ships with the package and
-holds the site-wide defaults — it is a `conffile`, so your edits survive
-upgrades. `/etc/minecraft/server.conf` is written by `mc install` / `mc upgrade`
-with the settings that install actually resolved, and it **overrides**
-`defaults.conf`.
+There are two kinds of configuration, in two places, and they do not overlap:
+
+| | Configures | Where |
+| --- | --- | --- |
+| **`mc`** | How the server is installed and run — which build, which Java, how much heap, when to back up | `/etc/minecraft/` |
+| **The server** | What the game does — port, seed, MOTD, difficulty, game rules, RCON | `/opt/minecraft/server.properties` |
+
+This section covers the first. For the second, edit `server.properties` and
+restart; see [Choosing the world before it
+exists](#choosing-the-world-before-it-exists).
+
+`mc`'s own configuration is two files, layered. `/etc/minecraft/defaults.conf`
+ships with the package and holds the site-wide defaults — it is a `conffile`, so
+your edits survive upgrades. `/etc/minecraft/server.conf` is written by
+`mc install` / `mc upgrade` with the settings that install actually resolved, and
+it **overrides** `defaults.conf`.
 
 Edit `defaults.conf` to change what a *future* install picks up; edit
 `server.conf` to change the server you already have.
@@ -214,7 +225,6 @@ Edit `defaults.conf` to change what a *future* install picks up; edit
 | `SERVER_RAM` | `4G` | On restart — sets both `-Xmx` and `-Xms` |
 | `SERVER_FLAGS` | *(auto)* | On restart — Generational ZGC on Java 21+, Aikar's G1GC on 17 |
 | `JAVA_OPTS` | *(empty)* | On restart — extra JVM options |
-| `SERVER_PORT` | `25565` | New installs only — seeds `server-port` and `rcon.port` (`+10`) in `server.properties`, which is authoritative from then on |
 | `BACKUP_KEEP` | `7` | Next backup |
 | `BACKUP_SCHEDULE` | `daily` | Next `mc install`/`mc upgrade` — see [Backups](#backups) |
 
@@ -226,16 +236,17 @@ sudo mc restart
 ```
 
 > [!NOTE]
-> **To change the port on a server that already exists, edit
-> `/opt/minecraft/server.properties`** — `server-port` there is what the server
-> binds, and `mc` reads it back rather than assuming `SERVER_PORT` still applies.
-> `SERVER_PORT` in `server.conf` is only the seed for a server that has no
-> properties file yet; `mc` rewrites it to match on the next command that saves
-> config, so the two converge instead of drifting.
+> **Ports belong to the server, so they live in `server.properties`.**
 >
-> The same goes for RCON: `mc` dials whatever `rcon.port` says, falling back to
-> the game port `+10` only when the server has no opinion yet. A hand-set
-> `rcon.port` is honoured and survives upgrades.
+> ```bash
+> sudoedit /opt/minecraft/server.properties   # server-port=..., rcon.port=...
+> sudo mc restart
+> ```
+>
+> `mc` reads that file whenever it needs one of those values rather than keeping
+> a copy of its own. For RCON it dials `rcon.port` when the server sets one, and
+> the game port `+10` otherwise — so a port you choose is honoured and survives
+> upgrades. `mc rcon status` reports what it resolved.
 
 #### Backups
 
@@ -303,12 +314,24 @@ sudo apt install mc-rcon
 ```
 mc rcon                    Open an interactive RCON session
 mc rcon <command>          Run a single command and print the response
+mc rcon enable             Turn RCON on in server.properties
+mc rcon disable            Turn RCON off
+mc rcon status             Show whether RCON is on, on which port, and whether it answers
 ```
+
+`enable`, `disable` and `status` act on `server.properties` rather than talking
+to the server, so they work while it is stopped — and while RCON is precisely
+what is currently off. They require root, because that file is `0640` and owned
+by the service account. The server reads it at startup, so `mc restart` is
+needed to apply a change; `mc` tells you when that is the case rather than
+restarting a populated server on your behalf.
 
 Installing `mc-rcon` automatically enables RCON on the managed server and
 generates a random password stored in `/etc/minecraft/server.passwd` (readable
-only by root and the `minecraft` user). Removing the package disables RCON again
-and restarts the server.
+only by root and the `minecraft` user). `mc install` provisions the same
+password if the plugin is present, so either install order works. Removing the
+package disables RCON again and restarts the server, leaving the password file
+in place so a reinstall restores the same secret.
 
 With RCON available, `mc stop` also becomes graceful: it warns players in-game
 and counts down before shutting the JVM down.

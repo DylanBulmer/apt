@@ -35,12 +35,10 @@ MC_USER="minecraft"
 
 # Minecraft's stock port.
 #
-# THERE IS NO SERVER_PORT CONFIG KNOB. The port lives in server.properties and
-# nowhere else — that is the file the JVM binds and rewrites, so a second copy
-# in server.conf could only ever be a stale duplicate of it. This constant is
-# used in exactly two places: seeding `server-port` into a server.properties
-# that does not exist yet, and standing in for the game port when computing the
-# RCON port before there is a file to read.
+# Ports belong to the server, so they live in server.properties; mc's own config
+# describes how to RUN the server, not what it is. This constant applies only
+# where that file does not exist yet: seeding `server-port` into a new one, and
+# standing in for the game port when computing the RCON port.
 MC_STOCK_PORT=25565
 
 # ── server.properties (read-only) ──────────────────────────────────────────────
@@ -55,12 +53,11 @@ MC_STOCK_PORT=25565
 # there is one parser rather than several that can disagree.
 #
 # NEVER RETURNS NON-ZERO: every caller runs under `set -euo pipefail`, and a key
-# that is simply absent is a normal answer, not an error. lib.sh used to parse
-# these itself with `grep ... | cut ...`, which took grep's exit status: an
-# absent key returned 1, and the plain assignment in managed_property_value()
-# turned that into an abort of the entire mc invocation. A missing or unreadable
-# file is likewise empty here — start.sh's own gate is what turns an unreadable
-# file into a refusal, and it does so with a legible message.
+# that is simply absent is a normal answer, not an error. A `grep | cut` here
+# would take grep's exit status, so an absent key would abort the whole mc
+# invocation from a plain assignment. A missing or unreadable file is likewise
+# empty — start.sh's own gate is what turns an unreadable file into a refusal,
+# and it does so with a legible message.
 mc_sprop_get() {
     local key="$1"
     local file="${2:-$MC_BASE/server.properties}"
@@ -75,17 +72,19 @@ mc_sprop_get() {
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-# Populate the SERVER_* / BACKUP_* / JAVA_* globals from, in increasing order of
-# precedence: built-in defaults, /etc/minecraft/defaults.conf, and
-# /etc/minecraft/server.conf (the per-server file written by write_config).
+# Populate mc's own settings — how to run the server: which build, which Java,
+# how much heap, backup policy. In increasing order of precedence: built-in
+# defaults, /etc/minecraft/defaults.conf, and /etc/minecraft/server.conf (the
+# per-server file written by write_config).
+#
+# The server's OWN settings are not here and never were. Port, seed, MOTD,
+# difficulty and RCON belong to server.properties, which the JVM reads and
+# rewrites; read those with mc_sprop_get/mc_rcon_port at the point of use.
 #
 # ORDERING IS LOAD-BEARING. SERVER_TYPE is *derived* from DEFAULT_SERVER_TYPE,
-# so it has to be resolved AFTER defaults.conf is sourced. It previously came
-# first, which meant DEFAULT_SERVER_TYPE was read before the file that sets it
-# had been loaded — so a `DEFAULT_SERVER_TYPE="paper"` in defaults.conf was
-# silently ignored and `mc install` always fell back to vanilla. (Only the first
-# call in a process was affected, and since mc is a fresh process per
-# invocation, that was every call.)
+# so it must be resolved AFTER defaults.conf is sourced. Resolving it earlier
+# reads DEFAULT_SERVER_TYPE before the file that sets it has been loaded, and a
+# `DEFAULT_SERVER_TYPE="paper"` there is silently ignored.
 load_config() {
     MINECRAFT_VERSION="latest"
     JAVA_VERSION=""
@@ -102,17 +101,6 @@ load_config() {
     # server.conf, sourced next, may override it with a concrete pinned value.
     SERVER_TYPE="${DEFAULT_SERVER_TYPE:-vanilla}"
 
-    # NOTHING ABOUT PORTS IS LOADED HERE. server.properties owns `server-port`
-    # and `rcon.port` outright — it is what the JVM binds, and what the JVM
-    # rewrites when it shuts down, so a copy in server.conf could only ever go
-    # stale. It did: editing server-port left the old config value in place, and
-    # because the RCON port was derived from it, every RCON call — `mc rcon`, the
-    # stop countdown, backup's save-off/save-all — silently addressed a port
-    # nothing was listening on.
-    #
-    # Read a port with mc_sprop_get/mc_rcon_port at the point of use instead.
-    # An older server.conf may still carry a SERVER_PORT line; sourcing it is
-    # harmless, nothing reads it, and write_config drops it on the next write.
     # shellcheck source=/dev/null
     [[ -f "$SERVER_CONF" ]] && source "$SERVER_CONF"
     return 0
@@ -246,10 +234,8 @@ mc_rcon_port() {
 # `tr` calls are what enforce that: '+/' are folded to '-_' and '=' padding is
 # stripped.
 #
-# Defined here rather than in lib.sh because the only caller is mc-rcon's
-# postinst. It previously lived in lib.sh, where nothing called it, while the
-# postinst carried a verbatim copy of this pipeline — two definitions of a
-# security-relevant charset, either of which could have been "tidied" alone.
+# Defined here rather than in lib.sh so the maintainer scripts, which source
+# only what they need, share this one definition of the charset.
 generate_rcon_password() {
     head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '='
 }
@@ -263,15 +249,12 @@ mc_rcon_available() {
 # Build the command that broadcasts $* to every player with no sender prefix.
 #
 # NOT `say`. The server renders `say <msg>` as "[<sender>] <msg>", and for a
-# command arriving over RCON that sender is literally "Rcon" — so
-# `say [Server] Shutting down in 5 minutes.` reached players as
-# "[Rcon] [Server] Shutting down in 5 minutes." tellraw writes a raw chat
-# component instead, which carries no attribution at all.
+# command arriving over RCON that sender is literally "Rcon", so players see
+# "[Rcon] [Server] …". tellraw writes a raw chat component with no attribution.
 #
 # Trade-off worth knowing: `say` is echoed to the server console, and so into
-# the journal, while tellraw is not. Both callers already write their own line
-# to stderr, which is where the journal copy actually comes from — the tier
-# decision in stop.sh and the info() lines in cmd_backup.
+# the journal, while tellraw is not. Both callers write their own line to
+# stderr, which is where the journal copy comes from.
 #
 # THE TEXT IS ESCAPED, NOT TRUSTED. Every message today is an internal literal,
 # but this string is interpolated into a JSON document that the server parses

@@ -18,7 +18,7 @@ printf '#!/bin/bash\nexit 0\n' > /usr/local/bin/sleep
 chmod 755 /usr/local/bin/sleep
 
 mkdir -p /opt/minecraft /etc/minecraft
-printf 'SERVER_PORT=25565\n' > /etc/minecraft/server.conf
+: > /etc/minecraft/server.conf     # load_config needs it to exist; ports come from properties
 printf 'server-port=25565\nrcon.port=25575\n' > /opt/minecraft/server.properties
 echo "pw" > /etc/minecraft/server.passwd
 
@@ -54,7 +54,7 @@ LIST_REPLY="gibberish from a modded server" bash /usr/lib/mc/stop.sh > /tmp/out3
 check_has   "unknown count explained" /tmp/out3 "[mc] Player count unavailable — assuming players are online"
 check_count "full countdown anyway"   /tmp/out3 "Announced to players:" 3
 
-section "RCON unavailable: previously silent"
+section "RCON unavailable: says so rather than stopping quietly"
 rm -f /etc/minecraft/server.passwd
 bash /usr/lib/mc/stop.sh > /tmp/out4 2>&1
 check_has "explains the silence"   /tmp/out4 "[mc] RCON unavailable — no in-game warning and no graceful stop"

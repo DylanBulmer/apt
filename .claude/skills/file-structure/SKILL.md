@@ -28,18 +28,18 @@ Dockerfile, nginx.conf       the container that serves the apt repo
 
 | File | Lines | Owns |
 |---|---|---|
-| `mc-server/usr/lib/mc/lib.sh` | ~1600 | Every `cmd_*` implementation. |
-| `mc-server/usr/lib/mc/common.sh` | ~208 | Definitions shared with the systemd-facing scripts. Side-effect free. |
+| `mc-server/usr/lib/mc/lib.sh` | ~1800 | Every `cmd_*` implementation. |
+| `mc-server/usr/lib/mc/common.sh` | ~300 | Definitions shared with the systemd-facing scripts. Side-effect free. |
 | `mc-server/usr/lib/mc/start.sh` | ~211 | `ExecStart`. GC presets, EULA + properties gates, JVM launch. |
-| `mc-server/usr/lib/mc/stop.sh` | ~169 | `ExecStop`. Player count, countdown tiers, graceful stop. |
+| `mc-server/usr/lib/mc/stop.sh` | ~210 | `ExecStop`. Player count, countdown tiers, graceful stop. |
 | `mc-server/usr/lib/mc/reload.sh` | ~24 | `ExecReload`. RCON `reload`. |
 | `mc-server/usr/bin/mc` | ~42 | Dispatcher only. Routes to `cmd_*`; sources `commands.d/*.sh`. |
 | `mc-server/lib/systemd/system/minecraft.service` | ~100 | Hardening, exit-code policy, timeouts. |
 | `mc-server/etc/minecraft/defaults.conf` | ~32 | Shipped defaults. A conffile. |
-| `mc-server/etc/bash_completion.d/mc` | ~63 | Completion. **Add new subcommands here too.** |
-| `mc-server/DEBIAN/postinst` | ~81 | Creates the user, sets ownership/modes, repairs prior installs. |
+| `mc-server/etc/bash_completion.d/mc` | ~68 | Completion. **Add new subcommands here too.** |
+| `mc-server/DEBIAN/postinst` | ~92 | Creates the user, sets ownership/modes, reloads systemd. |
 | `mc-rcon/src/rcon.c` | ~754 | Compiles to `/usr/bin/rcon`. |
-| `mc-rcon/usr/lib/mc/commands.d/rcon.sh` | ~34 | Registers the `rcon` subcommand — the plugin pattern. |
+| `mc-rcon/usr/lib/mc/commands.d/rcon.sh` | ~115 | Registers `rcon` (the plugin pattern) and its enable/disable/status verbs. |
 
 ## Function index
 
@@ -56,11 +56,14 @@ network, no `systemctl`.
 Broadcasts to players go through `mc_say_command` (a `tellraw`), never `say` —
 `say` renders as "[Rcon] …" when it arrives over RCON.
 
-`server.properties` is the source of truth for the keys the JVM owns
-(`server-port`, `rcon.port`, `enable-rcon`, `rcon.password`). `mc_sprop_get` is
-the only parser for them — read through it, never re-grep the file — and
-`load_config`/`mc_rcon_port` resolve *through* it, so `SERVER_PORT` in
-`server.conf` is only the seed for a server that has no properties file yet.
+**Two kinds of config.** `/etc/minecraft/` (`defaults.conf` → `server.conf`,
+via `load_config`) is *mc's*: how to run the server — build, Java, heap, backup
+policy. `/opt/minecraft/server.properties` is *the server's*: port, seed, MOTD,
+difficulty, RCON. Nothing from the second is mirrored into the first, because
+the JVM rewrites it. Read it with `mc_sprop_get` / `mc_rcon_port` at the point
+of use; `set_rcon_enabled` in `lib.sh` is the only writer of `enable-rcon` /
+`rcon.port` / `rcon.password`. `MC_STOCK_PORT` applies only before that file
+exists.
 
 **`lib.sh`** — root-only; reached through `usr/bin/mc`.
 
@@ -70,7 +73,7 @@ the only parser for them — read through it, never re-grep the file — and
 > *config* `write_config`
 > *cleanup/lock* `mc_cleanup` `mc_cleanup_arm` `cleanup_register_dir` `cleanup_unregister_dir` `acquire_lock`
 > *java/eula* `ensure_java` `accept_eula`
-> *systemd/rcon* `is_running` `rcon_command` (availability and password generation are in `common.sh`)
+> *systemd/rcon* `is_running` `rcon_command` `ensure_rcon_password` `set_rcon_enabled` (availability and password generation are in `common.sh`)
 > *properties* `sprop_secure` `sprop_set` `managed_property_value` `merge_server_properties` `init_server_properties` (reads go through `mc_sprop_get`)
 > *download* `validate_version` `verify_sha` `download_paper` `download_vanilla` `download_fabric` `install_neoforge` `resolve_version` `version_identifies_artifact` `download_jar` `install_server_artifact` (the staging→MC_BASE step shared by install/upgrade) `initialize_server_settings` (runs the jar with `--initSettings` so server.properties exists, fully populated, before any world does)
 > *mrpack* `mrpack_url_allowed` `make_staging_dir` `mrpack_safe_path` `mrpack_extract_overrides` `cmd_install_mrpack`
@@ -79,9 +82,9 @@ the only parser for them — read through it, never re-grep the file — and
 
 **Globals.** Paths (`MC_BASE` `MC_BACKUP` `MC_CONFIG` `DEFAULTS_CONF`
 `SERVER_CONF` `PASSWD_FILE` `MRPACK_MANIFEST` `LOCK_FILE` `MC_USER`) are defined
-once in `common.sh`. `load_config` sets `MINECRAFT_VERSION` `JAVA_VERSION`
-`SERVER_RAM` `SERVER_FLAGS` `JAVA_OPTS` `SERVER_PORT` `BACKUP_KEEP`
-`BACKUP_SCHEDULE` `SERVER_TYPE`. Never hardcode these paths.
+once in `common.sh`, alongside the `MC_STOCK_PORT` constant. `load_config` sets
+`MINECRAFT_VERSION` `JAVA_VERSION` `SERVER_RAM` `SERVER_FLAGS` `JAVA_OPTS`
+`BACKUP_KEEP` `BACKUP_SCHEDULE` `SERVER_TYPE` — no ports. Never hardcode paths.
 
 ## Exploration recipes
 
@@ -101,9 +104,9 @@ mrpack · `cmd_install` (~1036) · `cmd_upgrade` · `cmd_start` · `cmd_stop` ·
 `cmd_restart` · `cmd_status` · `cmd_backup` · `cmd_restore` · `cmd_logs` ·
 `cmd_delete` · `usage` (~1571). Then `Read` with `offset`/`limit`.
 
-**Trace a setting end to end** — default → config → properties → consumer:
+**Trace a setting end to end** — default → config → consumer:
 ```sh
-grep -rn "SERVER_PORT" packages/mc-server/
+grep -rn "BACKUP_SCHEDULE" packages/mc-server/
 ```
 
 **Find every caller of a helper before changing it:**
@@ -117,14 +120,16 @@ contract — `mc-rcon` registers into it and breaks silently otherwise.
 ### Anti-patterns
 
 - **Don't `ls -R`** — the layout is above and does not change often.
-- **Don't read `lib.sh` whole.** ~1600 lines. Use the section index.
+- **Don't read `lib.sh` whole.** ~1800 lines. Use the section index.
 - **Don't search generated trees.** `dist/`, `staging/`, `repo/db|dists|pool/`,
   and `packages/*/src/rcon` are gitignored build output.
 - **Don't trust remembered line numbers** across edits; re-grep the marker.
-- **Don't infer intent from code alone.** Comments here are dense and explain
-  *why*, usually recording a specific past bug (sed injection in `sprop_set`,
+- **Don't infer intent from code alone.** Comments here are dense and state
+  the constraint the code satisfies — sed injection in `sprop_set`,
   arithmetic-context injection in `mc_required_java`, ownership in
-  `sprop_secure`). Read the comment before changing the code it guards.
+  `sprop_secure`. Read the comment before changing the code it guards.
+- **Don't write changelog comments.** A comment describes the code that
+  follows, not what it replaced. No "used to", no migration notes.
 
 ## Runtime paths
 
@@ -146,7 +151,9 @@ silently falls back to compiled-in defaults.
 - **Shutdown behaviour** → `stop.sh` (recompute `TimeoutStopSec` in the unit if timings change)
 - **Anything the systemd scripts also need** → `common.sh`, not `lib.sh`
 - **Install-time ownership or repair of existing installs** → `DEBIAN/postinst`
-- **New default setting** → `defaults.conf` + `load_config()` in `common.sh`
+- **New setting for how mc runs the server** → `defaults.conf` + `load_config()`
+- **New setting for what the game does** → `server.properties`; do not add a
+  mirror in `server.conf`
 
 ## Verifying changes
 
@@ -189,8 +196,8 @@ dpkg-deb -x mc-server_<ver>_all.deb /tmp/x && grep -r <a-function-you-added> /tm
 
 **`mc-rcon` calls shell functions out of `mc-server`'s `common.sh`**, so its
 `Depends:` carries a version floor (`mc-server (>= X.Y.Z)`). Raise it whenever
-the postinst or `commands.d/rcon.sh` starts using a function mc-server did not
-previously define — unversioned, dpkg configures the plugin against an older
-library and the maintainer script dies with `command not found` (exit 127),
-leaving the package half-installed. `DEBIAN/control` takes no comments; the
+the postinst or `commands.d/rcon.sh` starts using a function that older
+mc-server versions lack — otherwise dpkg configures the plugin against a
+library without it and the maintainer script dies with `command not found`
+(exit 127), leaving the package half-installed. `DEBIAN/control` takes no comments; the
 reasoning lives in `mc-rcon/DEBIAN/postinst`.

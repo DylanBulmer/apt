@@ -21,8 +21,8 @@ check "rcon.port"     25575 "$(mc_sprop_get rcon.port)"
 check "rcon.password" ""    "$(mc_sprop_get rcon.password)"
 
 section "fresh install AFTER mc-rcon provisioned a password"
-# Installing the plugin first used to leave RCON off despite a provisioned
-# password, silently degrading the stop countdown, backups and `mc rcon`.
+# A provisioned password means RCON should come up enabled, whichever order
+# the two packages were installed in.
 rm -f "$MC_BASE/server.properties"
 echo "s3cret-pw" > "$PASSWD_FILE"
 init_server_properties
@@ -30,10 +30,9 @@ check "enable-rcon now true" true      "$(mc_sprop_get enable-rcon)"
 check "password seeded"      s3cret-pw "$(mc_sprop_get rcon.password)"
 
 section "RCON is provisioned when mc-rcon is present but the password is not"
-# mc-rcon's postinst is the only other writer of this file and it bails out when
-# no server exists yet, so `apt install mc-rcon` before `mc install` — and
-# `mc delete` followed by `mc install` — used to leave RCON off on a machine
-# with the plugin installed.
+# `mc install` provisions the password itself, so RCON comes up enabled even
+# when nothing else has written the file — the plugin installed before any
+# server exists, or a `mc delete` that took the old password with it.
 FAKEBIN="$SANDBOX/bin"; mkdir -p "$FAKEBIN"
 printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/rcon"; chmod 755 "$FAKEBIN/rcon"
 
@@ -64,8 +63,8 @@ init_server_properties
 check "enable-rcon false" false "$(mc_sprop_get enable-rcon)"
 echo "s3cret-pw" > "$PASSWD_FILE"        # restore the fixture for the sections below
 
-section "a legacy SERVER_PORT in server.conf does not seed the new file"
-# Older installs still carry the line. It must not leak into a freshly created
+section "mc's own config cannot seed a port into the new file"
+# A port-shaped variable in server.conf must not leak into a freshly created
 # server.properties — the stock port is the only seed.
 rm -f "$MC_BASE/server.properties"
 printf 'SERVER_PORT=25600\n' > "$SERVER_CONF"
@@ -75,8 +74,9 @@ check "rcon.port derived from it"     25575 "$(mc_sprop_get rcon.port)"
 : > "$SERVER_CONF"
 
 section "managed_property_value does not abort on an absent key"
-# It used to parse with `grep|cut`, whose non-match status (1) propagated
-# through a plain assignment and killed the whole mc invocation under set -e.
+# An absent key is a normal answer. A parser that reported it as a non-zero
+# status would kill the whole mc invocation from a plain assignment under
+# set -e.
 printf 'server-port=25700\n' > "$MC_BASE/server.properties"
 got=$(managed_property_value rcon.password)
 check "absent managed key -> derived" s3cret-pw "$got"

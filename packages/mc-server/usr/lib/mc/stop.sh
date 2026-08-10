@@ -19,13 +19,11 @@ load_config
 # Everything here goes to stderr, which systemd routes to the journal, so
 # `journalctl -u minecraft` explains what a shutdown did and why it took as long
 # as it did. A stop can occupy up to TimeoutStopSec (375 s) and is otherwise
-# completely opaque — an operator watching `systemctl stop minecraft` hang for
-# five minutes has no way to tell a countdown from a wedged RCON connection.
+# opaque — an operator watching `systemctl stop minecraft` hang for five minutes
+# cannot otherwise tell a countdown from a wedged RCON connection.
 #
-# This carries more weight since the announcements moved from `say` to tellraw:
-# the JVM echoed `say` to the server console, so the warnings landed in the
-# journal for free. tellraw is delivered only to players, so the record of what
-# was announced has to be written here.
+# The announcements themselves are tellraw, which the server does not echo to
+# its console, so this is the only record of what players were told.
 log() { echo "[mc] $*" >&2; }
 
 # ── Bounded RCON invocation ────────────────────────────────────────────────
@@ -203,9 +201,9 @@ if mc_rcon_available; then
     sleep 10
     log "Graceful stop finished; handing back to systemd."
 else
-    # Previously silent, which was the worst case to be silent in: `mc stop` on
-    # a populated server killed everyone with no warning and no explanation,
-    # and the journal showed nothing between "Stopping..." and the SIGTERM.
+    # The worst case to be quiet in: without RCON, `mc stop` on a populated
+    # server disconnects everyone with no in-game warning, and the journal would
+    # otherwise show nothing between "Stopping..." and the SIGTERM.
     log "RCON unavailable — no in-game warning and no graceful stop; systemd will signal the server directly."
     log "Install mc-rcon to enable the shutdown countdown."
 fi

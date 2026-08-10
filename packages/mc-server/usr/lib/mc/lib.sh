@@ -38,10 +38,10 @@ require_server() {
 #     mc_register_command rcon
 #
 # /usr/bin/mc dispatches an unrecognised subcommand ONLY if it appears here.
-# Previously the dispatcher accepted any name resolving to a `cmd_*` function,
-# which made internal helpers reachable from the command line — `mc
-# install_mrpack pack.mrpack` entered cmd_install_mrpack directly, bypassing the
-# require_root, acquire_lock and load_config that cmd_install performs first.
+# Resolving to a `cmd_*` function is necessary but NOT sufficient: without this
+# registry, internal helpers are reachable from the command line — `mc
+# install_mrpack pack.mrpack` would enter cmd_install_mrpack directly, bypassing
+# the require_root, acquire_lock and load_config its entry point performs first.
 MC_PLUGIN_COMMANDS=()
 
 mc_register_command() {
@@ -69,12 +69,10 @@ mc_is_plugin_command() {
 # Persist the effective configuration to $SERVER_CONF.
 #
 # EVERY VALUE IS WRITTEN THROUGH %q. load_config() *sources* this file as root,
-# so an unquoted value is a code-execution sink: a MINECRAFT_VERSION containing
-# a newline used to append its own line to the file, and one containing $(...)
-# had it run on the next `mc` invocation. Values reaching here are validated at
-# their entry points, but this file is the last line of defence and the one that
-# turns a one-shot parsing slip into persistent root execution — %q makes the
-# output shell-safe regardless of what the value contains.
+# so an unquoted value is a code-execution sink: a newline appends a line of its
+# own, and a $(...) runs on the next `mc` invocation. Values are validated at
+# their entry points too, but this is the last line of defence and the one that
+# turns a one-shot parsing slip into persistent root execution.
 
 write_config() {
     # BACKUP_SCHEDULE is interpolated into a systemd unit drop-in below, where
@@ -99,13 +97,10 @@ write_config() {
 
     # Regenerate the backup timer drop-in, and reload systemd if it moved.
     #
-    # THE RELOAD BELONGS HERE, next to the write that makes it necessary. It
-    # used to be reported to the caller through a _MC_TIMER_DROPIN_CHANGED
-    # global that each caller was expected to check — and only one of the three
-    # did. cmd_upgrade and the .mrpack path through cmd_install_mrpack both
-    # write this drop-in and neither checked the flag, so changing
-    # BACKUP_SCHEDULE by either route wrote a new schedule that systemd never
-    # read. Nothing outside this function can now forget.
+    # The reload belongs here, next to the write that makes it necessary, rather
+    # than being reported to callers to act on — every caller of write_config
+    # would have to remember, and a missed one writes a schedule systemd never
+    # reads.
     local dropin_dir="/etc/systemd/system/minecraft-backup.timer.d"
     local dropin="${dropin_dir}/schedule.conf"
     if [[ -d /etc/systemd/system ]]; then
@@ -130,11 +125,9 @@ write_config() {
 # ── Cleanup registry ───────────────────────────────────────────────────────────
 
 # bash supports exactly ONE EXIT trap, so every cleanup duty has to funnel
-# through a single handler. Call sites register/deregister duties here instead
-# of calling `trap` themselves — previously each `trap ... EXIT` silently
-# replaced the lock-file trap and a later `trap - EXIT` discarded everything,
-# leaking /run/minecraft/mc.lock on every install/upgrade/backup (which then
-# produced a spurious "Removing stale lock" warning on the next run).
+# through a single handler. Call sites register and deregister duties here; a
+# `trap ... EXIT` at a call site silently replaces this one and leaks whatever
+# it was holding, and a `trap - EXIT` discards every duty at once.
 
 _MC_CLEANUP_TRAP_SET="no"     # whether the single EXIT trap is installed
 _MC_CLEANUP_LOCK=""           # lock file to remove on exit ("" = none held)
@@ -276,10 +269,9 @@ ensure_java() {
 
 # Record acceptance of the Minecraft EULA in $MC_BASE/eula.txt.
 #
-# Writing `eula=true` accepts a licence agreement on the operator's behalf, so
-# it is never implicit. Earlier versions wrote it from init_server_properties()
-# as a side effect of installing, which meant nobody was ever asked. Consent now
-# comes from exactly one of two places: --accept-eula, or an interactive yes.
+# Writing `eula=true` accepts a licence agreement on the operator's behalf, so it
+# is never implicit and never a side effect of installing. Consent comes from
+# exactly one of two places: --accept-eula, or an interactive yes.
 #
 # Deliberately separate from ensure_java's --yes. That flag consents to
 # installing a package; this one consents to a licence. Folding them together
@@ -324,22 +316,14 @@ is_running() {
 
 # Provision the RCON password when mc-rcon is installed but the file is absent.
 #
-# THIS FILE HAD EXACTLY ONE WRITER: mc-rcon's postinst — and that bails out
-# early when no server exists yet:
+# Called from `mc install` and from mc-rcon's postinst, because either can be the
+# first to see both packages present: the postinst has nothing to configure
+# before a server exists, and `mc install` runs on a machine where the plugin may
+# already be installed. `mc delete` removes the password with the rest of the
+# server's secrets, so a reinstall lands here too.
 #
-#     [[ -f "$SERVER_CONF" ]] || exit 0
-#
-# So installing the plugin *before* creating a server, which is the order the
-# README's quick start documents, provisioned nothing: the postinst declined,
-# `mc install` had no password to find, and enable-rcon was written false on a
-# machine with mc-rcon installed. `mc delete` (which removes the password along
-# with the rest of the server's secrets) followed by a fresh `mc install` landed
-# in the same state. Neither was recoverable through the CLI, because nothing in
-# it ever created this file — only reinstalling mc-rcon did.
-#
-# Owner and mode match what the postinst writes: root:$MC_USER 0640, so the
-# service account can read the secret and nobody else can. The umask covers the
-# window between creation and the chmod.
+# root:$MC_USER 0640 — the service account can read the secret and nobody else
+# can. The umask covers the window between creation and the chmod.
 ensure_rcon_password() {
     # No client, no RCON. Same signal mc_rcon_available() uses, and it keeps a
     # server without the plugin from being handed a password it cannot use.
@@ -356,11 +340,9 @@ ensure_rcon_password() {
 # Bring the RCON block of server.properties to the requested state.
 #   $1  true | false
 #
-# THE ONE WRITER of enable-rcon / rcon.port / rcon.password. `mc rcon
-# enable|disable` and both of mc-rcon's maintainer scripts route through here;
-# the maintainer scripts used to carry their own `sed -i` copies, which is how
-# they drifted apart and how a '|' in a value would have ended the sed
-# expression early.
+# THE ONE WRITER of enable-rcon / rcon.port / rcon.password: `mc rcon
+# enable|disable` and both of mc-rcon's maintainer scripts route through here,
+# so the three keys cannot drift between them.
 #
 # RETURNS 0 IF SOMETHING CHANGED, 1 IF THE FILE ALREADY SAID THIS. Callers use
 # that to decide whether a restart is warranted — restarting a populated server
@@ -502,11 +484,10 @@ managed_property_value() {
 
 # Merge an override server.properties into the live one, protecting system-managed keys.
 #
-# This runs even when there is NO existing server.properties. It used to be
-# gated on one existing, which meant a first-time `mc install pack.mrpack`
-# rsynced the pack's own server.properties into place verbatim — letting the
-# pack set enable-rcon=true with a password of its choosing, and vanilla binds
-# RCON to every interface. The managed keys are now always re-applied.
+# Runs even when there is NO existing server.properties, so the managed keys are
+# always re-applied. Skipping that on a first install would put the pack's own
+# file in place verbatim, letting it set enable-rcon=true with a password of its
+# choosing — and the server binds RCON to every interface.
 merge_server_properties() {
     local override="$1"
     local dest="$MC_BASE/server.properties"
@@ -527,8 +508,8 @@ merge_server_properties() {
     cp "$override" "$dest"
     sprop_secure "$dest"
 
-    # Written unconditionally, empty values included: skipping empties (as this
-    # once did) would leave a pack-supplied rcon.password in place.
+    # Written unconditionally, empty values included: skipping an empty value
+    # would leave a pack-supplied rcon.password in place.
     for (( i=0; i<${#MC_MANAGED_PROPS[@]}; i++ )); do
         sprop_set "${MC_MANAGED_PROPS[i]}" "${saved[i]}"
     done
@@ -542,13 +523,9 @@ init_server_properties() {
     load_config
 
     # Seeded through managed_property_value so that "the value the system wants
-    # for a managed key" has ONE definition, shared with merge_server_properties.
-    # The four keys were previously spelled out here, with enable-rcon=false and
-    # an empty password hardcoded — so installing mc-rcon first and running
-    # `mc install` second produced a server with RCON off despite a provisioned
-    # password file, and every RCON-dependent path (the stop countdown, backup's
-    # save-off/save-all, `mc rcon`) silently degraded until someone reinstalled
-    # mc-rcon to trip its postinst again.
+    # for a managed key" has ONE definition, shared with merge_server_properties
+    # — in particular, RCON comes out enabled when a password has been
+    # provisioned, whatever order the two packages were installed in.
     #
     # Resolved into variables BEFORE the redirection below, which truncates the
     # file these values may be read from.
@@ -604,19 +581,15 @@ verify_sha() {
     info "Verified $(basename "$file") (${algo})"
 }
 
-# PaperMC's v2 API was SUNSET — api.papermc.io/v2 now answers every request with
-# HTTP 410 and {"ok":false,"error":"sunset"}, so `mc install --type paper` failed
-# at the first call with "Failed to fetch Paper version list." This targets the
-# v3 "fill" API, whose shape is different in three ways worth stating:
+# Targets PaperMC's v3 "fill" API. Its shape drives the awkward jq below:
 #
 #   * .versions is an OBJECT keyed by release family ("26.2": ["26.2","26.2-rc-2"]),
-#     newest family first, newest version first within it — not the flat
-#     oldest-first array v2 returned, so the old `.versions[-1]` has no analogue.
-#   * builds are a bare array, newest first (v2 nested them under .builds and put
-#     newest last).
+#     newest family first and newest version first within it — hence
+#     `[.versions[][]][0]` rather than an index into a flat array.
+#   * builds are a bare array, newest first.
 #   * each build carries a ready-made download URL on a separate host
-#     (fill-data.papermc.io) rather than a filename to interpolate into the API
-#     path, so the URL is used as given.
+#     (fill-data.papermc.io), so the URL is used as given rather than built from
+#     a filename.
 download_paper() {
     local version="$1" dest="$2"
     local api="https://fill.papermc.io/v3/projects/paper"
@@ -741,18 +714,10 @@ install_neoforge() {
     # with the rest of the tree. $server_dir is already registered with the
     # cleanup registry, so any `die` below removes the installer along with it.
     #
-    # This used to be `mktemp` plus `trap 'rm -f "$installer_jar"' RETURN`, and
-    # A RETURN TRAP IS NOT SCOPED TO THE FUNCTION THAT SETS IT. It stays armed
-    # and fires a SECOND time when the CALLER returns, at which point the local
-    # is out of scope and `set -u` kills the run with
-    # "installer_jar: unbound variable". While install_neoforge was called
-    # straight from cmd_install that landed after the install had finished and
-    # looked like harmless noise; once install_server_artifact wrapped it, the
-    # second firing aborted the install partway — leaving run.sh and libraries/
-    # in place with no server.conf and no server.properties.
-    #
-    # The cleanup registry above this function exists precisely so call sites do
-    # not hand-roll traps. Use it instead.
+    # Do NOT reach for `mktemp` plus a RETURN trap here: a RETURN trap is not
+    # scoped to the function that sets it, so it stays armed and fires again
+    # when the CALLER returns, by which point the local is gone and `set -u`
+    # aborts the run. The cleanup registry is the mechanism for this.
     local installer_jar="${server_dir}/.neoforge-installer.jar"
 
     info "Downloading NeoForge ${nf_version} installer..."
@@ -950,10 +915,7 @@ cmd_install_mrpack() {
     # under `set -u`, AFTER the pack has been rsynced into MC_BASE — an
     # installed server with no server.conf.
     #
-    # It used to be load-bearing: /usr/bin/mc dispatched any cmd_* function by
-    # name, so `mc install_mrpack pack.mrpack` entered here directly. The
-    # dispatcher now requires mc_register_command, which closed that path.
-    # Re-running load_config is harmless either way: the SERVER_TYPE /
+    # Re-running it on the normal path is harmless: the SERVER_TYPE and
     # MINECRAFT_VERSION it seeds are unconditionally replaced from the manifest
     # a few lines below.
     load_config
@@ -975,13 +937,11 @@ cmd_install_mrpack() {
     # ── Resolve version and server type ───────────────────────────────────────
     MINECRAFT_VERSION=$(echo "$manifest" | jq -r '.dependencies.minecraft')
 
-    # VALIDATE IMMEDIATELY, before this value is used for anything at all.
-    # It used to be checked only much later, inside download_jar — but it
-    # reaches mc_required_java (an arithmetic context, and so a code-execution
-    # sink) a few lines below, and on the NeoForge branch it never reached
-    # download_jar at all and went straight into write_config's output. Both
-    # sinks are hardened in their own right; this is the check that keeps a
-    # hostile value out of them in the first place.
+    # VALIDATE IMMEDIATELY, before this value is used for anything at all. It is
+    # attacker-controlled and reaches mc_required_java (an arithmetic context,
+    # and so a code-execution sink) a few lines below, and write_config's output
+    # on the NeoForge branch. Both sinks are hardened in their own right; this is
+    # what keeps a hostile value out of them in the first place.
     validate_version "$MINECRAFT_VERSION" "Minecraft version"
 
     local nf_version=""
@@ -1170,11 +1130,7 @@ cmd_install_mrpack() {
 # Fetch the configured SERVER_TYPE/MINECRAFT_VERSION into MC_BASE through a
 # staging dir, and repoint MINECRAFT_VERSION at the version actually resolved.
 #
-# Shared by cmd_install and cmd_upgrade, which carried a copy each. The copies
-# had already drifted in shape — install used an empty-string `staging` sentinel
-# and a trailing `if [[ -n "$staging" ]]` block to reach the rsync that only its
-# NeoForge branch needed, while upgrade simply put the rsync in that branch — so
-# the two had to be read side by side to confirm they still did the same thing.
+# Shared by cmd_install and cmd_upgrade, so the two cannot drift.
 #
 # Staging exists because both paths write into a live MC_BASE: nothing lands
 # there until the artifact is complete and verified. The dir is registered with
@@ -1204,34 +1160,23 @@ install_server_artifact() {
 # Materialise a COMPLETE server.properties without generating the world.
 #
 # `--initSettings` is a stock server flag: "Initializes 'server.properties' and
-# 'eula.txt', then quits". It writes out every key at its default and exits
-# before any level is created — which is the only window in which level-seed is
-# still meaningful. The seed is consumed when the world is first generated and
-# is inert from then on, so an operator who wants to choose it has to be given a
-# file to edit BEFORE the first start. init_server_properties() writes only the
-# four keys this package manages, so without this step level-seed and motd do
-# not physically exist in the file until the world already does.
-#
-# Verified against vanilla 26.2: exits 0, leaves an existing eula.txt untouched
-# (so the acceptance accept_eula() recorded survives), preserves every key that
-# already has a value (so the managed server-port/rcon.* survive), produces no
-# world/ directory, and fills the file out to ~69 keys. It also unpacks the
-# bootstrap jar's libraries/ and versions/, so the first real start is quicker.
+# 'eula.txt', then quits". It writes every key at its default and exits before
+# any level is created, which is the only window in which level-seed is still
+# meaningful — the seed is consumed at world creation and inert from then on.
+# It preserves keys that already have a value, so the managed server-port and
+# rcon.* survive, and it leaves an existing eula.txt alone. As a side effect it
+# unpacks the bootstrap jar's libraries/, making the first real start quicker.
 #
 # RUNS AS $MC_USER. As root the JVM would create a root-owned server.properties,
-# which the service account can then neither read nor write — the silent failure
-# that makes a server come up on compiled-in defaults and generate a stray world
-# next to the real one. For the same reason the mode is re-asserted afterwards:
-# the JVM writes this file under its own umask, and it carries the RCON
-# password, so it must not be left 0644.
+# which the service account can then neither read nor write — a server that comes
+# up on compiled-in defaults and generates a stray world next to the real one.
+# The mode is re-asserted afterwards for the same reason: the JVM writes the file
+# under its own umask, and it carries the RCON password.
 #
-# A failure here is a warning, not a death. The four-key file is still a working
-# configuration and the server fills in the rest itself on first boot; all that
-# is lost is the chance to pre-set the seed. That matters most for the server
-# types whose launcher this flag is not verified against — Paper is
-# vanilla-derived and should accept it, Fabric delegates to the vanilla Main,
-# and NeoForge's run.sh forwards program arguments, but none of the three are
-# confirmed the way vanilla is.
+# A failure here warns rather than dies. The four-key file is still a working
+# configuration and the server fills in the rest on first boot; only the chance
+# to pre-set the seed is lost. That matters most for launchers this flag is not
+# verified against — vanilla is confirmed; Paper, Fabric and NeoForge are not.
 initialize_server_settings() {
     local java_bin="java"
     if [[ -n "${JAVA_VERSION:-}" ]]; then
@@ -1260,18 +1205,11 @@ initialize_server_settings() {
     } 2>&1 ) || rc=$?
 
     # JUDGED ON THE OUTCOME, NOT THE EXIT CODE. NeoForge's FML wrapper exits 1
-    # even when this worked: --initSettings does its job and returns without
-    # ever starting the server thread, so FML logs
-    #
-    #   Initialized '/opt/minecraft/server.properties' and '/opt/minecraft/eula.txt'
-    #   net.neoforged.fml.startup.FatalStartupException: Couldn't find Minecraft
-    #   server thread. Startup likely failed.
-    #
-    # and returns non-zero. Trusting rc there told the operator the seed could
-    # no longer be set, immediately after the file that lets them set it had
-    # been written. level-seed is the key this whole step exists to expose and
-    # nothing else in this package ever writes it, so its presence — the line,
-    # not a value; it is legitimately empty — is the honest test of success.
+    # even when this worked: --initSettings returns without ever starting the
+    # server thread, which FML reports as a fatal startup after having written
+    # the file. level-seed is the key this step exists to expose and nothing else
+    # here writes it, so the presence of the line — not a value; it is
+    # legitimately empty — is the honest test of success.
     if grep -q '^level-seed=' "$MC_BASE/server.properties" 2>/dev/null; then
         # The JVM rewrote it under its own umask; restore 0640 minecraft:minecraft.
         sprop_secure
@@ -1352,17 +1290,13 @@ cmd_install() {
     fi
 
     # Moved ahead of the two steps below, which both need a working JVM:
-    # initialize_server_settings runs the server jar, and it can only do that
-    # once the runtime is installed. This used to be the last thing the function
-    # did, on the reasoning that a missing JRE should not block the download.
+    # Ahead of the two steps below, both of which need a working JVM:
+    # initialize_server_settings runs the server jar.
     ensure_java "$JAVA_VERSION" "$assume_yes"
 
     # Before initialize_server_settings, not after: that step runs the JVM as
-    # $MC_USER and it must be able to write here. This ran BEFORE
-    # init_server_properties once, so the file that call creates was left
-    # root-owned and the server came up on defaults. sprop_secure() now covers
-    # that file specifically; the order here is what keeps every *other*
-    # root-created file correct too.
+    # $MC_USER, which must be able to write here. Anything root creates in
+    # MC_BASE before this point is corrected by it.
     chown -R "$MC_USER:$MC_USER" "$MC_BASE"
 
     initialize_server_settings
@@ -1489,10 +1423,9 @@ cmd_start() {
 
 # Start the unit and report what actually happened.
 #
-# Shared by cmd_start and cmd_restart because `systemctl start` on a Type=simple
-# unit returns as soon as the process is forked — not when the server is up. Both
-# commands used to treat that return as success, so a start that refused half a
-# second later still printed a cheerful "Server started."/"Server restarted."
+# Shared by cmd_start and cmd_restart. `systemctl start` on a Type=simple unit
+# returns as soon as the process is forked, not when the server is up, so its
+# success says nothing about whether the server survived the next half second.
 #
 # Returns 0 only once the server is genuinely running; on failure the reason has
 # already been printed.
@@ -1506,9 +1439,9 @@ start_and_verify() {
         return 1
     fi
 
-    # Wait up to 60 s for the unit to reach active state. Poll at 0.5 s and
-    # check *before* the first sleep: the old 5 s-first loop charged a server
-    # that was already active a full 5 s of dead time.
+    # Wait up to 60 s for the unit to reach active state, polling at 0.5 s and
+    # checking *before* the first sleep so an already-active server is not
+    # charged any dead time.
     local i
     for (( i=0; i<120; i++ )); do
         # Checked first, and every iteration: start.sh's config refusals exit
@@ -1634,10 +1567,10 @@ cmd_backup() {
         sleep 3
     fi
 
-    # Ensure save-on is restored even if the script is interrupted. This duty
-    # lives in the cleanup registry rather than in a `local` referenced by an
-    # ad-hoc EXIT trap: a `local` is out of scope whenever the shell exits from
-    # outside this function, so the old trap could silently leave saves off.
+    # Ensure save-on is restored even if the script is interrupted. The duty goes
+    # in the cleanup registry rather than an ad-hoc EXIT trap over a `local`:
+    # that local is out of scope whenever the shell exits from outside this
+    # function, which is exactly when saves would be left off.
     if $was_running; then
         _MC_CLEANUP_SAVE_ON="yes"
         mc_cleanup_arm

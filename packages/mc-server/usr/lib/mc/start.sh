@@ -19,15 +19,13 @@ set -euo pipefail
 #
 # EX_CONFIG (78, from sysexits(3)) means "an operator has to fix something before
 # this unit can start" — EULA not accepted, unreadable server.properties, missing
-# server.jar. It is distinct from the JVM's own exit codes on purpose.
+# server.jar.
 #
-# The unit used to carry SuccessExitStatus=0 1, which papered over the two cases
-# with one rule: the gates below exit non-zero, and so does a crashing JVM, so
-# declaring 1 a success silenced BOTH. A server that died of a real fault was
-# recorded as a clean stop, Restart=on-failure never fired, and `systemctl
-# is-failed` stayed quiet. Now the gates use a code of their own, the unit maps
-# it to RestartPreventExitStatus=, and every other non-zero exit is a genuine
-# failure that systemd reports and restarts.
+# DISTINCT FROM THE JVM'S OWN EXIT CODES ON PURPOSE. A crashing JVM also exits
+# non-zero, so a rule broad enough to stop these gates from restart-looping
+# would silence real crashes too. The unit maps this one code to
+# RestartPreventExitStatus=; every other non-zero exit is a genuine failure that
+# systemd reports and restarts.
 EX_CONFIG=78
 
 FLAGS_G1GC_JAVA8="\

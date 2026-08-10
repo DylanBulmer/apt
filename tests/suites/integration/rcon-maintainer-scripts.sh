@@ -47,8 +47,8 @@ run() { # run <tag> <script> [dpkg-arg]
 }
 
 section "postinst provisions the password even with no server yet"
-# It used to bail out before this, which is why installing the plugin first and
-# creating a server second left RCON off entirely.
+# The password is provisioned before the "is there a server" check, so it
+# exists from the moment the client is installed.
 rm -f "$PW" "$SANDBOX/etc/server.conf" "$PROPS"
 run p0 postinst
 check "password created"        yes "$([[ -s "$PW" ]] && echo yes)"

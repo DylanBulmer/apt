@@ -36,23 +36,14 @@ case "$1" in
         mkdir -p "$MC_BACKUP"
         chown root:root "$MC_BACKUP"
         chmod 700 "$MC_BACKUP"
-        # Reclaim archives from installs made before this was tightened.
-        find "$MC_BACKUP" -maxdepth 1 -type f -name 'minecraft-*.tar.gz' \
-            -exec chown root:root {} + 2>/dev/null || true
-        find "$MC_BACKUP" -maxdepth 1 -type f -name 'minecraft-*.tar.gz' \
-            -exec chmod 600 {} + 2>/dev/null || true
 
-        # Likewise for an existing server.properties: it was created 0644 by
-        # earlier versions, leaving the RCON password readable by any local user.
-        #
-        # The chown repairs a second, louder breakage. `mc install` used to
-        # chown the server directory before writing this file, so the file was
-        # left root-owned — 0640 root:root, which the JVM (running as $MC_USER)
-        # can neither read nor write. Such a server starts on compiled-in
-        # defaults instead of its own config. Editing the file by hand as root
-        # with a write-and-rename editor (sed -i, some vim configs) reproduces
-        # exactly the same state, so this runs on every configure, not just on
-        # upgrades from the affected versions.
+        # Assert owner AND mode on an existing server.properties. 0644 leaves the
+        # RCON password readable by every local user; root-owned 0640 is worse,
+        # because the JVM runs as $MC_USER and can then neither read nor write
+        # it, so the server comes up on compiled-in defaults instead of its own
+        # config. Editing the file as root with a write-and-rename editor
+        # (`sed -i`, some vim configs) produces exactly that, which is why this
+        # runs on every configure rather than only on upgrades.
         if [[ -f "$MC_BASE/server.properties" ]]; then
             chown "$MC_USER:$MC_USER" "$MC_BASE/server.properties"
             chmod 640 "$MC_BASE/server.properties"
@@ -72,18 +63,15 @@ case "$1" in
         # effect, then make sure the backup timer is running.
         #
         # GATED ON /run/systemd/system, the canonical "systemd is the running
-        # init" test (it is what dh_installsystemd generates). This used to read
-        # `systemctl is-system-running --quiet`, which is a HEALTH check, not a
-        # presence check: it succeeds only for the exact state "running" and
-        # returns non-zero for "degraded" — the state of any machine with even
-        # one failed unit, anywhere, related or not. Such a machine silently
-        # skipped the reload AND the timer setup.
+        # init" test, and what dh_installsystemd generates.
         #
-        # When minecraft.service was itself the failed unit the skip became
-        # self-sustaining: the system stayed degraded, so every subsequent
-        # upgrade skipped the reload too, and systemd kept warning that
-        # minecraft.service "changed on disk" until someone ran daemon-reload by
-        # hand — which is the one action the postinst was supposed to cover.
+        # Do NOT gate on `systemctl is-system-running`: that is a HEALTH check,
+        # not a presence check. It succeeds only for the exact state "running"
+        # and returns non-zero for "degraded" — any machine with one failed unit,
+        # related or not — which would skip the reload and the timer setup. If
+        # minecraft.service were the failed unit that becomes self-sustaining:
+        # the system stays degraded, every later upgrade skips the reload, and
+        # systemd keeps warning that the unit changed on disk.
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
 

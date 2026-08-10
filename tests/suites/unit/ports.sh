@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Port resolution. server.properties owns the port outright; there is no
-# SERVER_PORT config knob, and this suite is what keeps one from coming back.
+# Port resolution. Ports belong to the server, so server.properties is the only
+# place they are read from — mc's own config describes how to run the server,
+# not what it is. This suite is what keeps a mirror from creeping into it.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../../lib/assert.sh"
 source "$MC_COMMON"
@@ -27,10 +28,9 @@ section "a hand-set rcon.port is used verbatim"
 props "server-port=25700" "rcon.port=27000"; load_config
 check "rcon.port wins over the +10 convention" 27000 "$(mc_rcon_port)"
 
-section "a legacy SERVER_PORT in server.conf is inert"
-# server.conf carried this for years and older installs still have the line.
-# It must not resurrect itself as a source of truth — the whole point of the
-# rewrite is that the port lives in exactly one file.
+section "mc's own config cannot set a port"
+# A port-shaped variable in server.conf must never become a source of truth,
+# whether someone adds one by hand or a future change reintroduces the idea.
 printf 'SERVER_PORT=29999\n' > "$SERVER_CONF"
 props "server-port=25700"; load_config
 check "properties still wins"       25710 "$(mc_rcon_port)"
