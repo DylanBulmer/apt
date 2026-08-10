@@ -10,6 +10,11 @@ for _plugin in /usr/lib/mc/commands.d/*.sh; do
 done
 unset _plugin
 
+# Kept intact for mc_elevate, which re-runs this invocation under sudo. By the
+# time a guard inside a cmd_* decides root is needed, the command's own option
+# parsing has consumed the arguments, and $@ no longer describes what was typed.
+_MC_ARGV=("$@")
+
 _MC_CMD="${1:-help}"
 shift || true
 

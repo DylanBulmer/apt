@@ -91,7 +91,10 @@ section 'writes still require root'
 for u in "$MEMBER" "$OUTSIDER"; do
     as "$u" mc rcon enable > "/tmp/enable.$u.out" 2>&1
     check "rcon enable refused for $u" '1' "$?"
-    check_has "refusal for $u is the root one" "/tmp/enable.$u.out" 'must be run as root.'
+    # Also checks the refusal echoes back the argv the dispatcher captured,
+    # which is what mc_elevate would have re-run.
+    check_has "refusal for $u is the root one" "/tmp/enable.$u.out" \
+              'must be run as root: sudo mc rcon enable'
 done
 
 section 'an interactive session is open to the group'
@@ -110,5 +113,67 @@ as "$MEMBER" env PATH="/tmp/bin:/usr/local/bin:/usr/bin:/bin" \
 check 'exits 1 (nothing listening)' '1' "$?"
 check_has 'got as far as connecting' /tmp/session.member.out 'Could not connect to 127.0.0.1:25710'
 check_lacks 'not refused for access' /tmp/session.member.out 'must be run as root'
+
+# ── Elevation ────────────────────────────────────────────────────────────────
+#
+# From here on the member may sudo without a password. That isolates what is
+# under test — whether mc decides to escalate — from sudo's authentication,
+# which is not ours to verify.
+echo "$MEMBER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/mc-test
+chmod 440 /etc/sudoers.d/mc-test
+
+section 'a root-only command re-runs itself under sudo'
+# script(1) supplies the pty that mc_elevate requires. `mc backup` is a good
+# probe: it writes into /var/backups/minecraft, which is root:root 0700, so the
+# archive appearing is proof the work ran as root and not merely that the
+# command exited 0.
+rm -f /var/backups/minecraft/minecraft-*.tar.gz
+as "$MEMBER" script -qec "mc backup" /dev/null > /tmp/elevate.out 2>&1
+check 'elevated run succeeds' '0' "$?"
+check_has 'the escalation is announced' /tmp/elevate.out 'needs root'
+check_has 'the command then ran'        /tmp/elevate.out 'Backup complete'
+check 'archive was written to the root-only dir' '1' \
+      "$(ls -1 /var/backups/minecraft/minecraft-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
+# If the member could reach that directory itself, the check above would prove
+# nothing about privilege.
+as "$MEMBER" ls /var/backups/minecraft > /dev/null 2>&1
+check 'member cannot read the backup dir unaided' '2' "$?"
+
+section 'without a terminal it refuses rather than hanging'
+# Same user, same sudo rights, no pty — the backup timer, a hook and a CI runner
+# all look like this, and a password prompt there would block forever.
+rm -f /var/backups/minecraft/minecraft-*.tar.gz
+as "$MEMBER" mc backup > /tmp/notty.out 2>&1
+check 'refused' '1' "$?"
+check_has 'told how to run it'  /tmp/notty.out 'sudo mc backup'
+check_lacks 'did not escalate'  /tmp/notty.out 'needs root — re-running'
+check 'no archive written' '0' \
+      "$(ls -1 /var/backups/minecraft/minecraft-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
+
+section 'with no sudo installed it degrades to a plain refusal'
+# What lets mc-server leave sudo out of its Depends: the feature is optional and
+# its absence must cost nothing but the convenience. The image has sudo, so the
+# binary is hidden behind a stripped PATH rather than uninstalled.
+#
+# bash has to be reachable on that PATH too: mc is `#!/usr/bin/env bash`, and
+# env resolves the interpreter through PATH, so the shebang would fail before
+# mc ever ran.
+mkdir -p /tmp/nosudo
+ln -sf /usr/bin/mc /tmp/nosudo/mc
+ln -sf /bin/bash   /tmp/nosudo/bash
+as "$MEMBER" script -qec "env PATH=/tmp/nosudo mc backup" /dev/null > /tmp/nosudo.out 2>&1
+check 'refused' '1' "$?"
+check_lacks 'did not escalate'    /tmp/nosudo.out 'needs root — re-running'
+check_has 'plain refusal instead' /tmp/nosudo.out 'must be run as root: sudo mc backup'
+check 'no archive written' '0' \
+      "$(ls -1 /var/backups/minecraft/minecraft-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
+
+section 'an already-elevated run never escalates again'
+# The loop guard. A sudoers runas_default that is not root would otherwise put
+# this in a sudo prompt that never ends.
+as "$MEMBER" script -qec "env MC_ELEVATED=1 mc backup" /dev/null > /tmp/loop.out 2>&1
+check 'refused' '1' "$?"
+check_lacks 'did not escalate' /tmp/loop.out 'needs root — re-running'
+check_has 'plain refusal instead' /tmp/loop.out 'must be run as root'
 
 report

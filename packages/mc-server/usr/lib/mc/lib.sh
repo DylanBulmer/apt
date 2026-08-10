@@ -16,8 +16,41 @@ warn()  { echo -e "${YELLOW}[mc]${NC} $*" >&2; }
 error() { echo -e "${RED}[mc]${NC} $*" >&2; }
 die()   { error "$*"; exit 1; }
 
+# Re-run this invocation under sudo. Execs on success, so it returns only when
+# elevation was not attempted; callers report the refusal themselves.
+#
+# Nothing here weakens a privilege boundary — sudo still applies its own policy,
+# and a user with no sudo rights gets sudo's refusal instead of ours. It only
+# spares the operator retyping a command that was always going to need root.
+mc_elevate() {
+    # The sentinel is passed through `env` as part of the command rather than
+    # exported: sudo resets the environment by default, and --preserve-env needs
+    # a sudoers grant this cannot assume.
+    #
+    # It guards against a sudoers runas_default that is not root. Without it,
+    # such a host would re-enter this function as an unprivileged user and spawn
+    # another sudo, forever.
+    if [[ -n "${MC_ELEVATED:-}" ]]; then return 0; fi
+    if ! command -v sudo >/dev/null 2>&1; then return 0; fi
+    # No captured argv means lib.sh was sourced by something other than the
+    # dispatcher — mc-rcon's maintainer scripts do this — and there is no
+    # invocation to re-run. Those already run as root.
+    if [[ -z "${_MC_ARGV+set}" ]]; then return 0; fi
+
+    # Only escalate where a human can answer the prompt. Under the backup timer,
+    # a hook or a CI runner, sudo would block on a password nobody can type;
+    # refusing outright is the honest outcome there, and the caller's message
+    # says what to do.
+    if [[ ! -t 0 || ! -t 2 ]]; then return 0; fi
+
+    warn "This needs root — re-running under sudo."
+    exec sudo -- env MC_ELEVATED=1 "$MC_BIN" "${_MC_ARGV[@]}"
+}
+
 require_root() {
-    [[ $EUID -eq 0 ]] || die "This command must be run as root."
+    if [[ $EUID -eq 0 ]]; then return 0; fi
+    mc_elevate
+    die "This command must be run as root: sudo mc ${_MC_ARGV[*]:-<command>}"
 }
 
 # Root, or a member of the $MC_USER group — the guard for read-only commands.
@@ -39,6 +72,9 @@ require_root() {
 require_root_or_group() {
     if [[ $EUID -eq 0 ]]; then return 0; fi
     if id -nG 2>/dev/null | tr ' ' '\n' | grep -qxF "$MC_USER"; then return 0; fi
+    # Elevation is the fallback, not the fix: joining the group makes this and
+    # every later read work with no prompt at all, so the refusal leads with it.
+    mc_elevate
     die "This command must be run as root, or by a member of the '${MC_USER}' group.\nAdd yourself:  sudo usermod -aG ${MC_USER} \$USER   (then log out and back in)"
 }
 

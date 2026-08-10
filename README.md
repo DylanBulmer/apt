@@ -120,6 +120,27 @@ mc delete                                  Permanently remove the server
 
 Server types: `vanilla` (default), `paper`, `fabric`, `neoforge`.
 
+**Privileges.** `mc status` and `mc logs` need no root at all (`logs` needs the
+usual journal access — the `adm` or `systemd-journal` group). Everything else
+writes to `/opt/minecraft` or root-only `/var/backups/minecraft`, or drives
+systemd, so it genuinely needs root.
+
+You do not have to remember which is which. Run any of them without `sudo` at a
+terminal and `mc` re-runs itself under `sudo` for you:
+
+```
+$ mc backup
+[mc] This needs root — re-running under sudo.
+[sudo] password for alice:
+[mc] Creating backup: /var/backups/minecraft/minecraft-20260810-142233.tar.gz
+```
+
+This grants nothing: `sudo` applies its own policy, so a user who is not in
+`sudoers` gets `sudo`'s refusal. Where there is no terminal to answer a prompt —
+the backup timer, a hook, a CI runner — `mc` refuses outright with the command
+to run instead, rather than blocking on a password nobody can type. Without
+`sudo` installed it does the same, so `doas` and `run0` users are unaffected.
+
 `mc` takes two consent flags, both of which it otherwise asks about
 interactively:
 
@@ -331,7 +352,8 @@ sudo usermod -aG minecraft alice     # takes effect at alice's next login
 
 `enable` and `disable` stay root-only, because they *write* `server.properties`
 — which the group can read but not write — and may create the password file in
-root-owned `/etc/minecraft`.
+root-owned `/etc/minecraft`. As with every root-only command, running one at a
+terminal without `sudo` re-runs it under `sudo` rather than refusing.
 
 Note what that group grants: full operator control of the game server, `/stop`
 included. It is not a way to hand out a limited console.
@@ -452,6 +474,15 @@ Backups are written and read by root only, never handed to the `minecraft` user,
 so a compromised server cannot rewrite an archive that a later `mc restore`
 unpacks as root. Archive members are validated for traversal, absolute paths,
 and non-regular entry types before extraction.
+
+Membership of the `minecraft` group is a real grant: it carries read access to
+the RCON password, and so to full in-game operator control including `/stop`. It
+confers nothing on the host — writes to `/opt/minecraft`, `/etc/minecraft` and
+the backups stay root-only.
+
+`mc`'s automatic `sudo` is a convenience, not a privilege: it re-runs the same
+command through `sudo`, which applies the system's own policy unchanged. It is
+skipped entirely when there is no terminal to prompt at.
 
 All packages are signed; `apt` verifies them against the key above.
 

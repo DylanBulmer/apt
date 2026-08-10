@@ -33,6 +33,12 @@ MRPACK_MANIFEST="$MC_CONFIG/server.mrpack.json"
 LOCK_FILE="/run/minecraft/mc.lock"
 MC_USER="minecraft"
 
+# The dispatcher itself. mc_elevate re-runs this exact path under sudo, so it is
+# spelled out rather than taken from $0: $0 is whatever the caller typed, which
+# may be relative, reached through a symlink, or resolved from a PATH the
+# elevated process will not have.
+MC_BIN="/usr/bin/mc"
+
 # Minecraft's stock port.
 #
 # Ports belong to the server, so they live in server.properties; mc's own config

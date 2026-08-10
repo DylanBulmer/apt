@@ -22,9 +22,11 @@ FROM debian:13-slim
 #   curl jq rsync    mc-server runtime Depends
 #   unzip            .mrpack support     zip: building fixture packs
 #   shellcheck       the lint suite
+#   sudo             mc_elevate re-runs itself through it; not a package
+#                    dependency, since mc degrades to a plain refusal without it
 RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends \
-      ca-certificates curl jq rsync unzip zip \
+      ca-certificates curl jq rsync unzip zip sudo \
       gcc make libc6-dev \
       openjdk-21-jre-headless openjdk-25-jre-headless \
       shellcheck \
