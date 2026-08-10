@@ -312,16 +312,29 @@ sudo apt install mc-rcon
 ```
 
 ```
-sudo mc rcon               Open an interactive RCON session
-sudo mc rcon <command>     Run a single command and print the response
+mc rcon                    Open an interactive RCON session
+mc rcon <command>          Run a single command and print the response
+mc rcon status             Show whether RCON is on, on which port, and whether it answers
 sudo mc rcon enable        Turn RCON on in server.properties
 sudo mc rcon disable       Turn RCON off
-sudo mc rcon status        Show whether RCON is on, on which port, and whether it answers
 ```
 
-Every form needs root: the password lives in `/etc/minecraft/server.passwd`
-(`0640`, `root:minecraft`) and the port in `server.properties` (`0640`, owned by
-the service account), and neither is readable by an ordinary user.
+The first three are open to root **and to members of the `minecraft` group** —
+they only read files that group can already read: the port in
+`server.properties` (`0640 minecraft:minecraft`) and the password in
+`/etc/minecraft/server.passwd` (`0640 root:minecraft`). To give an operator
+in-game admin without handing them the host:
+
+```bash
+sudo usermod -aG minecraft alice     # takes effect at alice's next login
+```
+
+`enable` and `disable` stay root-only, because they *write* `server.properties`
+— which the group can read but not write — and may create the password file in
+root-owned `/etc/minecraft`.
+
+Note what that group grants: full operator control of the game server, `/stop`
+included. It is not a way to hand out a limited console.
 
 `enable`, `disable` and `status` act on `server.properties` rather than talking
 to the server, so they work while it is stopped — and while RCON is precisely

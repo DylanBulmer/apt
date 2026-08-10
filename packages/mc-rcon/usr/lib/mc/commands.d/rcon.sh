@@ -18,10 +18,16 @@ cmd_rcon() {
         enable|disable|status)
             local verb="$1"; shift
             [[ $# -eq 0 ]] || die "mc rcon ${verb} takes no arguments."
-            # Reading and writing server.properties both need root: it is 0640
-            # and owned by the service account precisely so that it is not
-            # world-readable — it carries the RCON password.
-            require_root
+            # enable/disable rewrite server.properties and may provision the
+            # password file, so they need root: the file is 0640 owned by the
+            # service account, which makes it readable by the minecraft group
+            # but writable only by its owner, and /etc/minecraft is root-owned.
+            # status only reads those files, which the group may already do.
+            if [[ "$verb" == "status" ]]; then
+                require_root_or_group
+            else
+                require_root
+            fi
             require_server
             load_config
             cmd_rcon_"$verb"
@@ -30,14 +36,17 @@ cmd_rcon() {
         --) shift ;;
     esac
 
-    # Root first, and before require_server: everything this path touches is
-    # closed to an ordinary user — MC_BASE is 0750 minecraft:minecraft, the
-    # password file is 0640 root:minecraft, and server.properties (which carries
-    # the port) is 0640 minecraft:minecraft. Checking server_installed first
-    # would fail its -f test purely because the directory is unreadable and
-    # report "No server installed" to a user whose server is installed and
-    # running.
-    require_root
+    # Access check first, and before require_server: everything this path
+    # touches is closed to a user outside the minecraft group — MC_BASE is 0750
+    # minecraft:minecraft, the password file is 0640 root:minecraft, and
+    # server.properties (which carries the port) is 0640 minecraft:minecraft.
+    # Checking server_installed first would fail its -f test purely because the
+    # directory is untraversable and report "No server installed" to a user
+    # whose server is installed and running.
+    #
+    # A session only reads those files, so group membership is enough; see
+    # require_root_or_group for why root would buy nothing here.
+    require_root_or_group
     require_server
 
     # is_running() asks systemd, which fails fast with a clear message under

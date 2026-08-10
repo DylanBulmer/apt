@@ -1,8 +1,8 @@
 Package: mc-rcon
-Version: 0.4.6
+Version: 0.4.7
 Architecture: any
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
-Depends: mc-server (>= 0.7.0)
+Depends: mc-server (>= 0.8.0)
 Section: admin
 Priority: optional
 Homepage: https://apt.bulmer.dev

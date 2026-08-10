@@ -77,7 +77,7 @@ check "no borrowed function is missing" "" "$missing"
 
 section "the same holds for the rcon subcommand plugin"
 missing=""
-for fn in $(grep -oE '\b(mc_[a-z_]+|load_config|set_rcon_enabled|require_root|require_server|is_running|info|warn|die)\b' \
+for fn in $(grep -oE '\b(mc_[a-z_]+|load_config|set_rcon_enabled|require_[a-z_]+|is_running|info|warn|die)\b' \
             "$MC_RCON_PKG/usr/lib/mc/commands.d/rcon.sh" | sort -u); do
     grep -qhE "^${fn}\(\)" /usr/lib/mc/lib.sh /usr/lib/mc/common.sh || missing="$missing $fn"
 done

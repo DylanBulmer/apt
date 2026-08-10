@@ -20,6 +20,28 @@ require_root() {
     [[ $EUID -eq 0 ]] || die "This command must be run as root."
 }
 
+# Root, or a member of the $MC_USER group — the guard for read-only commands.
+#
+# That group is already the unit of access to this server's files: MC_BASE is
+# 0750 minecraft:minecraft, server.properties inside it 0640, and the RCON
+# password 0640 root:minecraft. A member can therefore read the port and the
+# password and drive the running server with /usr/bin/rcon by hand. Demanding
+# root for a command that only reads those same files would protect nothing and
+# would leave `mc` less capable than the binary it wraps.
+#
+# Anything that WRITES still takes require_root: the group has read access to
+# server.properties, not write, and /etc/minecraft is root-owned.
+#
+# Membership comes from `id -nG` with no argument — the groups this process
+# actually holds — rather than a lookup by name. A group added since login does
+# not apply until the next one, and a name lookup would report access the
+# process does not have.
+require_root_or_group() {
+    if [[ $EUID -eq 0 ]]; then return 0; fi
+    if id -nG 2>/dev/null | tr ' ' '\n' | grep -qxF "$MC_USER"; then return 0; fi
+    die "This command must be run as root, or by a member of the '${MC_USER}' group.\nAdd yourself:  sudo usermod -aG ${MC_USER} \$USER   (then log out and back in)"
+}
+
 # True when a server is present. NeoForge installs a run.sh instead of a
 # plain server.jar, so both count.
 server_installed() {
