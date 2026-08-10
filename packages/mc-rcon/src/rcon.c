@@ -16,6 +16,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,6 +90,54 @@ static uint32_t u32_to_le(uint32_t value)
     return result;
 }
 #define le_to_u32 u32_to_le  /* the encoding is symmetric */
+
+/* ── Console output ──────────────────────────────────────────────────────────
+ *
+ * The same shape as mc's own logging: an "[mc]" tag on stderr, green for
+ * progress, yellow for a warning, red for a failure, using the codes lib.sh
+ * defines — so a session and the `mc rcon` that launched it read as one tool.
+ *
+ * The colour, but never the tag, is dropped when stderr is not a terminal. This
+ * binary is also run from stop.sh and reload.sh under systemd, where escape
+ * codes would land in the journal as literal bytes; lib.sh only ever writes to
+ * an operator's terminal, which is why it can colour unconditionally and this
+ * cannot.
+ *
+ * stdout is deliberately left plain: it carries the server's own replies, which
+ * callers such as stop.sh parse.
+ */
+#define C_RED    "\033[0;31m"
+#define C_GREEN  "\033[0;32m"
+#define C_YELLOW "\033[1;33m"
+#define C_OFF    "\033[0m"
+
+static void mc_vmsg(const char *colour, const char *fmt, va_list ap)
+{
+    static int tty = -1;
+    if (tty < 0) tty = isatty(STDERR_FILENO);
+
+    if (tty) fprintf(stderr, "%s[mc]%s ", colour, C_OFF);
+    else     fputs("[mc] ", stderr);
+
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+}
+
+/* Declared printf-style so -Wformat still checks every call site. Each appends
+ * its own newline; call sites pass the message without one. */
+#define MC_LOGGER(name, colour)                        \
+    __attribute__((format(printf, 1, 2)))              \
+    static void name(const char *fmt, ...)             \
+    {                                                  \
+        va_list ap;                                    \
+        va_start(ap, fmt);                             \
+        mc_vmsg(colour, fmt, ap);                      \
+        va_end(ap);                                    \
+    }
+
+MC_LOGGER(mc_info,  C_GREEN)
+MC_LOGGER(mc_warn,  C_YELLOW)
+MC_LOGGER(mc_error, C_RED)
 
 /* ── I/O helpers ─────────────────────────────────────────────────────────── */
 
@@ -180,8 +229,8 @@ static int recv_all(int fd, void *buf, size_t remaining)
         if (g_deadline_active) {
             long left = deadline_remaining_ms();
             if (left <= 0) {
-                fprintf(stderr, "rcon: server did not complete its response "
-                                "within %d s — aborting\n", CMD_DEADLINE_S);
+                mc_error("Server did not complete its response within %d s "
+                         "— aborting.", CMD_DEADLINE_S);
                 return -1;
             }
             set_rcv_timeout_ms(fd, left < IO_TIMEOUT_S * 1000L
@@ -206,8 +255,7 @@ static int pkt_send(int fd, int32_t id, int32_t type, const char *payload)
 {
     size_t raw_len = strlen(payload);
     if (raw_len > MAX_PAYLOAD) {
-        fprintf(stderr, "rcon: payload too large (%zu > %d bytes)\n",
-                raw_len, MAX_PAYLOAD);
+        mc_error("Payload too large (%zu > %d bytes).", raw_len, MAX_PAYLOAD);
         return -1;
     }
 
@@ -262,7 +310,7 @@ static int pkt_recv(int fd, int32_t *out_id, int32_t *out_type,
     /* Minimum valid packet has an empty payload: id(4)+type(4)+pad(2) = PKT_OVERHEAD.
      * Upper bound uses the server→client limit (4096), not the client→server limit. */
     if (length < PKT_OVERHEAD || length > PKT_OVERHEAD + MAX_RESPONSE_PAYLOAD) {
-        fprintf(stderr, "rcon: invalid packet length %d\n", length);
+        mc_error("Invalid packet length %d.", length);
         return -1;
     }
 
@@ -323,7 +371,7 @@ static int rcon_connect(const char *host, const char *port)
 
     int gai_err = getaddrinfo(host, port, &hints, &res);
     if (gai_err != 0) {
-        fprintf(stderr, "rcon: %s: %s\n", host, gai_strerror(gai_err));
+        mc_error("%s: %s", host, gai_strerror(gai_err));
         return -1;
     }
 
@@ -332,10 +380,9 @@ static int rcon_connect(const char *host, const char *port)
      * password and all commands on the wire. */
     for (candidate = res; candidate != NULL; candidate = candidate->ai_next) {
         if (!is_loopback(candidate)) {
-            fprintf(stderr,
-                    "rcon: refusing non-loopback host '%s' — "
-                    "RCON is unencrypted and must only be used over loopback "
-                    "(127.0.0.1 / ::1)\n", host);
+            mc_error("Refusing non-loopback host '%s' — RCON is unencrypted "
+                     "and must only be used over loopback (127.0.0.1 / ::1).",
+                     host);
             freeaddrinfo(res);
             return -1;
         }
@@ -354,8 +401,7 @@ static int rcon_connect(const char *host, const char *port)
         int rcv_err = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         int snd_err = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         if (rcv_err < 0 || snd_err < 0) {
-            fprintf(stderr, "rcon: warning: could not set I/O timeouts: %s\n",
-                    strerror(errno));
+            mc_warn("Could not set I/O timeouts: %s", strerror(errno));
         }
 
         if (connect(fd, candidate->ai_addr, candidate->ai_addrlen) == 0) break;
@@ -367,7 +413,7 @@ static int rcon_connect(const char *host, const char *port)
     freeaddrinfo(res);
 
     if (fd < 0) {
-        fprintf(stderr, "rcon: could not connect to %s:%s\n", host, port);
+        mc_error("Could not connect to %s:%s.", host, port);
         return -1;
     }
 
@@ -395,11 +441,11 @@ static int rcon_auth(int fd, const char *password)
     /* The server echoes the request ID back on success, or replies -1 on failure.
      * Verify both conditions: the failure sentinel and the expected echo. */
     if (id == -1) {
-        fprintf(stderr, "rcon: authentication failed — check password\n");
+        mc_error("Authentication failed — check the password.");
         return -1;
     }
     if (id != ID_AUTH) {
-        fprintf(stderr, "rcon: unexpected response ID %d during auth\n", id);
+        mc_error("Unexpected response ID %d during authentication.", id);
         return -1;
     }
     return 0;
@@ -444,8 +490,8 @@ static char *rcon_exec_inner(int fd, const char *cmd)
 
     for (int packets = 0; ; packets++) {
         if (packets >= MAX_RESPONSE_PKTS) {
-            fprintf(stderr, "rcon: server sent %d packets without terminating "
-                            "the response — aborting\n", MAX_RESPONSE_PKTS);
+            mc_error("Server sent %d packets without terminating the response "
+                     "— aborting.", MAX_RESPONSE_PKTS);
             free(buf);
             return NULL;
         }
@@ -487,8 +533,8 @@ static char *rcon_exec_inner(int fd, const char *cmd)
              * draining to the sentinel to leave the socket usable, and a server
              * this far out of spec is not one we want to keep talking to. */
             if (plen > (size_t)MAX_TOTAL_RESPONSE - len) {
-                fprintf(stderr, "rcon: response exceeds %d bytes — aborting\n",
-                        MAX_TOTAL_RESPONSE);
+                mc_error("Response exceeds %d bytes — aborting.",
+                         MAX_TOTAL_RESPONSE);
                 free(payload);
                 free(buf);
                 return NULL;
@@ -507,7 +553,7 @@ static char *rcon_exec_inner(int fd, const char *cmd)
                  * still valid and must be freed, not leaked. */
                 char *grown = realloc(buf, newcap);
                 if (!grown) {
-                    fprintf(stderr, "rcon: out of memory reassembling response\n");
+                    mc_error("Out of memory reassembling the response.");
                     free(payload);
                     free(buf);
                     return NULL;
@@ -565,7 +611,7 @@ static char *build_command(int argc, char *argv[], int start)
     for (int i = start; i < argc; i++) {
         size_t arg_len = strlen(argv[i]);
         if (arg_len > MAX_PAYLOAD || total + arg_len + 1 > MAX_PAYLOAD) {
-            fprintf(stderr, "rcon: command too long (> %d bytes)\n", MAX_PAYLOAD);
+            mc_error("Command too long (> %d bytes).", MAX_PAYLOAD);
             return NULL;
         }
         total += arg_len + 1;
@@ -588,7 +634,7 @@ static char *build_command(int argc, char *argv[], int start)
 
 static int run_interactive(int fd, const char *host, const char *port)
 {
-    fprintf(stderr, "Connected to %s:%s — type a command, or Ctrl+D to exit.\n",
+    mc_info("Connected to %s:%s — type a command, or Ctrl+D to exit.",
             host, port);
 
     char line[MAX_PAYLOAD + 1];
@@ -610,7 +656,7 @@ static int run_interactive(int fd, const char *host, const char *port)
 
         char *resp = rcon_exec(fd, line);
         if (!resp) {
-            fprintf(stderr, "rcon: connection lost\n");
+            mc_error("Connection lost.");
             return 1;
         }
         if (*resp) puts(resp);
@@ -632,8 +678,7 @@ static int read_password_file(const char *path, char *out, size_t out_sz)
     /* O_CLOEXEC so the descriptor can't leak into any process we might spawn. */
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        fprintf(stderr, "rcon: cannot open password file '%s': %s\n",
-                path, strerror(errno));
+        mc_error("Cannot open password file '%s': %s", path, strerror(errno));
         return -1;
     }
 
@@ -642,8 +687,8 @@ static int read_password_file(const char *path, char *out, size_t out_sz)
         ssize_t n = read(fd, out + total, out_sz - 1 - total);
         if (n < 0) {
             if (errno == EINTR) continue;
-            fprintf(stderr, "rcon: error reading password file '%s': %s\n",
-                    path, strerror(errno));
+            mc_error("Error reading password file '%s': %s",
+                     path, strerror(errno));
             explicit_bzero(out, out_sz);
             close(fd);
             return -1;
@@ -659,7 +704,7 @@ static int read_password_file(const char *path, char *out, size_t out_sz)
         out[--total] = '\0';
 
     if (total == 0) {
-        fprintf(stderr, "rcon: password file '%s' is empty\n", path);
+        mc_error("Password file '%s' is empty.", path);
         return -1;
     }
     return 0;
@@ -703,7 +748,8 @@ int main(int argc, char *argv[])
             i++;
             break;
         } else {
-            fprintf(stderr, "rcon: unknown option '%s'\n\n", argv[i]);
+            mc_error("Unknown option '%s'.", argv[i]);
+            fputc('\n', stderr);  /* blank line before the usage block */
             usage(argv[0]);
             return 1;
         }

@@ -183,7 +183,7 @@ rc=$?
 wait "$MOCK_PID" 2>/dev/null
 
 check 'client exits 0'            '0' "$rc"
-check_lacks 'no connection lost'  "$WORK/err1" 'connection lost'
+check_lacks 'no connection lost'  "$WORK/err1" 'Connection lost'
 # The regression: the command and the sentinel arriving in one read.
 check_lacks 'server saw no framing error' "$WORK/log1" 'FRAMING-ERROR'
 check_has 'first command answered'  "$WORK/out1" 'ran whitelist add A'
@@ -212,5 +212,21 @@ check 'all three fragments reassembled' '4096 4096 4096 ' "$frag_counts"
 # Proof the socket is still correctly positioned: a desynchronised stream would
 # hand this command a leftover fragment instead of its own reply.
 check_has 'next command answered correctly' "$WORK/out2" 'ran after'
+
+# ── Console output matches mc's ──────────────────────────────────────────────
+
+section 'Message formatting'
+
+# stderr here is a file, not a terminal — the same shape it has under systemd,
+# where escape codes would reach the journal as literal bytes.
+check_has 'banner carries the [mc] tag' "$WORK/err1" '[mc] Connected to 127.0.0.1:'
+check_lacks 'no colour when stderr is not a tty' "$WORK/err1" $'\033['
+# Server replies are the payload callers parse; they must stay untagged.
+check_lacks 'command output is not tagged' "$WORK/out1" '[mc]'
+
+# Port 1 has nothing listening, so this exercises the failure path without a mock.
+"$WORK/rcon" --password-file "$WORK/pw" 127.0.0.1 1 list > /dev/null 2> "$WORK/err3"
+check 'unreachable port exits 1' '1' "$?"
+check_has 'connect failure is tagged' "$WORK/err3" '[mc] Could not connect to 127.0.0.1:1'
 
 report
