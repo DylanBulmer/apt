@@ -265,14 +265,134 @@ mod tests {
     }
 
     #[test]
-    fn install_accepts_a_pack_with_file_flag() {
-        let cli = Cli::try_parse_from(["mc", "install", "-f", "pack.mrpack", "--accept-eula"]).unwrap();
+    fn install_short_hand_v_parses_version() {
+        let cli = Cli::try_parse_from(["mc", "install", "-v", "1.21"]).unwrap();
+        match cli.command {
+            Command::Install(args) => assert_eq!(args.version.as_deref(), Some("1.21")),
+            other => panic!("expected Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_short_hand_t_parses_type() {
+        let cli = Cli::try_parse_from(["mc", "install", "-t", "paper"]).unwrap();
+        match cli.command {
+            Command::Install(args) => assert_eq!(args.server_type, Some(ServerType::Paper)),
+            other => panic!("expected Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_short_hand_f_parses_pack() {
+        let cli = Cli::try_parse_from(["mc", "install", "-f", "pack.mrpack"]).unwrap();
+        match cli.command {
+            Command::Install(args) => assert_eq!(args.pack.as_deref(), Some("pack.mrpack")),
+            other => panic!("expected Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_short_hand_y_sets_yes() {
+        let cli = Cli::try_parse_from(["mc", "install", "-y"]).unwrap();
+        match cli.command {
+            Command::Install(args) => assert!(args.yes),
+            other => panic!("expected Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_short_hand_capital_f_sets_force() {
+        let cli = Cli::try_parse_from(["mc", "install", "-F"]).unwrap();
+        match cli.command {
+            Command::Install(args) => assert!(args.force),
+            other => panic!("expected Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_all_short_hands_together() {
+        let cli = Cli::try_parse_from([
+            "mc", "install", "-t", "fabric", "-v", "1.21", "-y", "-F",
+        ]).unwrap();
         match cli.command {
             Command::Install(args) => {
-                assert_eq!(args.pack.as_deref(), Some("pack.mrpack"));
-                assert!(args.accept_eula);
+                assert_eq!(args.server_type, Some(ServerType::Fabric));
+                assert_eq!(args.version.as_deref(), Some("1.21"));
+                assert!(args.yes);
+                assert!(args.force);
             }
             other => panic!("expected Install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_short_hand_v_parses_version() {
+        let cli = Cli::try_parse_from(["mc", "upgrade", "-v", "1.21"]).unwrap();
+        match cli.command {
+            Command::Upgrade(args) => assert_eq!(args.version.as_deref(), Some("1.21")),
+            other => panic!("expected Upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_short_hand_t_parses_type() {
+        let cli = Cli::try_parse_from(["mc", "upgrade", "-t", "paper"]).unwrap();
+        match cli.command {
+            Command::Upgrade(args) => assert_eq!(args.server_type, Some(ServerType::Paper)),
+            other => panic!("expected Upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_short_hand_f_parses_pack() {
+        let cli = Cli::try_parse_from(["mc", "upgrade", "-f", "pack.mrpack"]).unwrap();
+        match cli.command {
+            Command::Upgrade(args) => assert_eq!(args.pack.as_deref(), Some("pack.mrpack")),
+            other => panic!("expected Upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_short_hand_y_sets_yes() {
+        let cli = Cli::try_parse_from(["mc", "upgrade", "-y"]).unwrap();
+        match cli.command {
+            Command::Upgrade(args) => assert!(args.yes),
+            other => panic!("expected Upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_short_hand_capital_f_sets_force() {
+        let cli = Cli::try_parse_from(["mc", "upgrade", "-F"]).unwrap();
+        match cli.command {
+            Command::Upgrade(args) => assert!(args.force),
+            other => panic!("expected Upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_short_hand_n_sets_no_backup() {
+        let cli = Cli::try_parse_from(["mc", "upgrade", "-n"]).unwrap();
+        match cli.command {
+            Command::Upgrade(args) => assert!(args.no_backup),
+            other => panic!("expected Upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_all_short_hands_together() {
+        let cli = Cli::try_parse_from([
+            "mc", "upgrade", "-t", "vanilla", "-v", "1.21.9", "-y", "-F", "-n",
+        ]).unwrap();
+        match cli.command {
+            Command::Upgrade(args) => {
+                assert_eq!(args.server_type, Some(ServerType::Vanilla));
+                assert_eq!(args.version.as_deref(), Some("1.21.9"));
+                assert!(args.yes);
+                assert!(args.force);
+                assert!(args.no_backup);
+            }
+            other => panic!("expected Upgrade, got {other:?}"),
         }
     }
 
