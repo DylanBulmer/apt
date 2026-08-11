@@ -33,6 +33,8 @@ cargo fmt --all --check
 mc/tests/run.sh                 # tier 4 container suites   ~1 min
 mc/tests/run.sh --all           # + the live install matrix ~3 min, real APIs
 
+cargo run -p xtask -- man /tmp/man1           # render mc.1; read with `man /tmp/man1/mc.1`
+
 bash mc/scripts/build.sh mc-server            # → mc/dist/*.deb (needs Debian)
 bash apt/scripts/publish.sh mc/dist/<pkg>.deb # needs reprepro + the signing key
 ```
@@ -44,8 +46,9 @@ pinned by `mc/rust-toolchain.toml`. Publishing is normally CI's job — pushing 
 
 ## Repository layout
 
-Two components. **`mc/`** is the product: the cargo workspace (`crates/`), the
-Debian packaging trees (`packages/`), its tests and its build script.
+Two components. **`mc/`** is the product: the cargo workspace (`crates/`, which
+includes `xtask` — build-time tooling that ships in nothing), the Debian
+packaging trees (`packages/`), its tests and its build script.
 **`apt/`** is the distribution: reprepro config, the signing key, `publish.sh`,
 and the nginx image that serves the repository — `apt/` is that image's whole
 build context, which is why its `COPY` paths carry no prefix.
@@ -120,8 +123,20 @@ read as a list of promises.
 
 **A new `mc` subcommand touches three places:** the `Command` variant in
 `cli.rs`, its arm in `Command::requirement()`, and a handler in `commands/`.
-Completions are generated from clap, so they cannot go stale. A new *capability*
-should usually be a plugin instead — see the `plugin-development` skill.
+Completions and `mc(1)`'s command list are both generated from clap, so neither
+can go stale. A new *capability* should usually be a plugin instead — see the
+`plugin-development` skill.
+
+**Manual pages are half generated, half prose, and the split is deliberate.**
+`mc.1`'s SYNOPSIS and COMMANDS come from the clap tree via `cargo run -p xtask
+-- man`; its prose sections are raw roff in `crates/mc/man/`. Everything else —
+`mc-config(5)`, `mc-plugins(5)`, and one page per plugin — is hand-written under
+`packages/<name>/usr/share/man/`, which is where a file that is not compiled
+belongs. `mc man <command>` resolves a plugin command through the registry to
+`mc-<plugin name>(1)`, so **a plugin's page must be named after the plugin and
+ship in the plugin's own package**; a tier-1 test asserts that, and others check
+the hook events, the ABI number and every config key against the code. Write the
+page in the same commit as the command.
 
 **Never hardcode a runtime path.** Everything derives from `Paths`, which is a
 struct rather than a set of constants so tests can point it at a temp root via

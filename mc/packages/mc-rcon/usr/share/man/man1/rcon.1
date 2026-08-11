@@ -1,0 +1,88 @@
+.\" /usr/bin/rcon — the standalone client. `mc rcon` is mc-rcon(1).
+.TH RCON 1 "" "mc" "mc manual"
+.SH NAME
+rcon \- standalone Minecraft RCON client
+.SH SYNOPSIS
+.B rcon
+.BI \-\-password\-file " FILE"
+.I HOST PORT
+.RI [ command ...]
+.SH DESCRIPTION
+A minimal RCON client, installed by the
+.B mc-rcon
+package. It is useful by hand and by script, and it is what a member of the
+.B minecraft
+group can run without root.
+.PP
+With no
+.IR command ,
+it opens an interactive session and reads commands from standard input, one per
+line, until end of file. With a
+.IR command ,
+it sends that one, prints the reply and exits. Everything after
+.I PORT
+is the command, including anything that starts with a dash.
+.PP
+For the server this host manages,
+.BR "mc rcon" (1)
+is the easier route: it resolves the port and the password file for you. Use
+this when you need neither.
+.SH OPTIONS
+.TP
+.BI \-\-password\-file " FILE"
+Read the password from
+.IR FILE ,
+trimming trailing whitespace. Required.
+.IP
+There is deliberately no option to pass the password itself.
+.I /proc/<pid>/cmdline
+is world-readable, so a password in argv is visible to every local user on the
+machine for as long as the process runs.
+.TP
+.BR \-h ", " \-\-help
+Print usage and exit.
+.SH ARGUMENTS
+.TP
+.I HOST
+Must resolve to a loopback address. The client refuses anything else \(em
+including a name that resolves to both a loopback and a public address, since
+which one a connection lands on is not the caller's choice. RCON is
+unencrypted; it has no business on a network.
+.TP
+.I PORT
+The RCON port, not the game port. Usually the game port plus 10.
+.B mc rcon status
+prints the one in use.
+.SH EXAMPLES
+.PP
+.nf
+.RS
+rcon \-\-password\-file /etc/minecraft/server.passwd 127.0.0.1 25575 list
+.RE
+.fi
+.PP
+Interactive, as a member of the
+.B minecraft
+group:
+.PP
+.nf
+.RS
+rcon \-\-password\-file /etc/minecraft/server.passwd 127.0.0.1 25575
+.RE
+.fi
+.SH "EXIT STATUS"
+.TP
+.B 0
+The command was sent and a reply received.
+.TP
+.B 1
+Bad usage, an unreadable password file, a refused host, a failed
+authentication, or a connection that could not be made.
+.SH FILES
+.TP
+.I /etc/minecraft/server.passwd
+Where mc keeps the password for the server on this host.
+.BR "root:minecraft 0640" .
+.SH SEE ALSO
+.BR mc-rcon (1),
+.BR mc (1)

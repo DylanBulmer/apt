@@ -1,0 +1,158 @@
+.\" Hand-written: there is no parser to generate a file format from. The keys
+.\" here must match mc_common::config — a tier-1 test asserts they do.
+.TH MC-CONFIG 5 "" "mc" "mc manual"
+.SH NAME
+mc-config \- configuration file for the mc Minecraft server manager
+.SH SYNOPSIS
+.I /etc/minecraft/config.toml
+.SH DESCRIPTION
+TOML, read by every
+.BR mc (1)
+command that needs to know how to run the server. A dpkg conffile: your edits
+survive package upgrades, and dpkg asks before replacing it.
+.PP
+This file describes
+.IR "how to run the server" .
+What the server
+.I is
+\(em port, seed, MOTD, difficulty, game rules, RCON \(em lives in
+.I /opt/minecraft/server.properties
+instead, because the JVM reads and rewrites that file at every start. Nothing
+from it is mirrored here; a copy could only go stale.
+.PP
+An unknown key is an error rather than a warning. A misspelled setting that
+loaded silently would leave the server running on a default the operator
+believes they changed.
+.SH "[server]"
+.TP
+.B type
+.RI ( vanilla ", " paper ", " fabric ", " neoforge ", default " vanilla )
+Which upstream build to install. Anything else is refused at parse time.
+.B forge
+and
+.B quilt
+are named in the refusal rather than lumped in with typos: both have a real
+upstream and are simply not supported yet.
+.IP
+Changing this after installation does not migrate a server. Install again with
+.BR "mc install --type" ,
+or restore into a fresh install.
+.TP
+.B version
+.RI ( "string, default " latest )
+The Minecraft version.
+.B mc install
+resolves
+.B latest
+and writes the concrete result back here, so a later
+.B mc upgrade
+can tell whether anything actually moved.
+.IP
+For
+.B vanilla
+and
+.BR neoforge ,
+an unchanged version means an unchanged artifact and
+.B mc upgrade
+skips the work. Paper publishes new builds against one Minecraft version and
+Fabric ships new loader versions the same way, so for those two the upgrade
+always runs.
+.SH "[java]"
+.TP
+.B version
+.RI ( integer ", unset by default )
+Major Java version to launch with. Unset selects from the Minecraft version
+being installed:
+.RS
+.IP \(bu 2
+1.20.5 and later, 1.21.x \(em Java 21
+.IP \(bu 2
+26.x \(em Java 25
+.IP \(bu 2
+1.18 to 1.20.4 \(em Java 17
+.RE
+.IP
+Set it only to pin a runtime deliberately. If the pinned version is not
+installed,
+.B mc serve
+warns and falls back to the system
+.BR java ;
+the GC flags below are then chosen from the runtime that actually starts, not
+from the one this file asked for, because a Java 21 flag set handed to a Java
+17 JVM is a boot failure.
+.TP
+.B ram
+.RI ( "string, default " 4G )
+Heap size, passed as both
+.B \-Xmx
+and
+.BR \-Xms .
+Equal minimum and maximum on purpose: a heap that grows under load pauses to do
+it.
+.TP
+.B flags
+.RI ( "list of strings, default empty" )
+Garbage-collector flags. Empty auto-configures from the Java version \(em
+generational ZGC on 21 and later, Aikar's G1GC tuning on 17. Setting this
+replaces the preset entirely; it is not merged.
+.TP
+.B opts
+.RI ( "list of strings, default empty" )
+Extra JVM options, appended after the GC flags. For example
+.RB [ \-Dfile.encoding=UTF-8 ].
+.SH "[backup]"
+Read by
+.BR mc-backup (1),
+which is a separate package. The keys are ignored if it is not installed.
+.TP
+.B keep
+.RI ( "integer, default " 7 )
+How many archives to retain. Rotation runs after a successful backup and
+removes the oldest beyond this count.
+.B 0
+disables rotation \(em it does not delete everything.
+.TP
+.B schedule
+.RI ( "string, default " daily )
+systemd
+.B OnCalendar=
+syntax, for example
+.BR weekly ,
+or
+.BR "Mon *-*-* 02:00:00" .
+Takes effect at the next
+.B mc install
+or
+.BR "mc upgrade" ,
+which regenerates
+.IR /etc/systemd/system/minecraft-backup.timer.d/schedule.conf .
+See
+.BR systemd.time (7).
+.SH EXAMPLE
+.nf
+.RS
+[server]
+type = "paper"
+version = "1.21.4"
+
+[java]
+ram = "8G"
+opts = ["\-Dfile.encoding=UTF\-8"]
+
+[backup]
+keep = 14
+schedule = "Mon *\-*\-* 02:00:00"
+.RE
+.fi
+.SH FILES
+.TP
+.I /etc/minecraft/config.toml
+This file.
+.TP
+.I /opt/minecraft/server.properties
+The game's own configuration \(em the other half of the split described above.
+.SH SEE ALSO
+.BR mc (1),
+.BR mc-backup (1),
+.BR mc-plugins (5),
+.BR systemd.time (7)

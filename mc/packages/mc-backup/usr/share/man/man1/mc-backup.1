@@ -1,0 +1,163 @@
+.\" Covers both commands this package contributes. mc-restore.1 is a .so stub
+.\" pointing here; build.sh turns it into a symlink when it compresses.
+.TH MC-BACKUP 1 "" "mc" "mc manual"
+.SH NAME
+mc-backup \- back up and restore an mc-managed Minecraft server
+.SH SYNOPSIS
+.B mc backup
+.br
+.B mc restore
+.I ARCHIVE
+.SH DESCRIPTION
+The
+.B mc-backup
+package adds
+.B mc backup
+and
+.B mc restore
+to
+.BR mc (1),
+and a systemd timer that takes a backup on the schedule in
+.BR mc-config (5).
+.PP
+An archive is a gzipped tar of
+.I /opt/minecraft
+\(em the world, the jar, the mods, the configuration. Both commands need root
+and both take the mc lock, so a backup cannot run halfway through an install,
+and a restore cannot run while a scheduled backup is archiving the directory it
+is emptying.
+.SH COMMANDS
+.TP
+.B mc backup
+Archive the server now, into
+.IR /var/backups/minecraft/minecraft-YYYYmmdd-HHMMSS.tar.gz ,
+UTC. Then rotate: the oldest archives beyond
+.B backup.keep
+are removed.
+.IP
+If the server is running and a console plugin is installed, the world is
+flushed and held still for the duration \(em see
+.BR mc-rcon (1).
+Without one the archive is still taken, of a world that was not flushed, and
+says so. A backup of an unflushed world beats no backup.
+.IP
+A half-written archive is deleted rather than left behind, because rotation
+would otherwise count it as the newest and a restore could choose it.
+.TP
+.B mc restore \fIARCHIVE\fR
+Replace
+.I /opt/minecraft
+with the contents of
+.IR ARCHIVE .
+The server is stopped if it is running, and left stopped: start it yourself
+once you have looked at what you restored.
+.IP
+The archive is validated in full
+.I before
+the server is stopped and before a single file is removed, so a bad archive is
+refused while the running server and its directory are still intact.
+Ownership is asserted from the account that exists on this machine rather than
+taken from the uids stored in the archive.
+.SH "WHAT IS ARCHIVED"
+Everything under
+.I /opt/minecraft
+except
+.IR logs/ ,
+.I crash-reports/
+and
+.IR cache/ ,
+which are regenerated and are the bulk of a long-lived server's disk use.
+.PP
+.I mods/
+and
+.I libraries/
+.I are
+archived, even though they could in principle be re-downloaded: a restore is a
+plain extraction with no network step, and a modpack whose upstream has moved
+on is exactly the case a backup exists for.
+.PP
+Symlinks inside the server directory are archived as symlinks rather than
+followed.
+.SH SECURITY
+An archive is attacker-controlled input handled as root \(em it may have come
+from anywhere \(em so a restore validates every member before extracting
+anything:
+.IP \(bu 2
+Names may not escape the destination:
+.IR .. ,
+absolute paths and symlink traversal are all refused.
+.IP \(bu 2
+Entry
+.I types
+are checked as well as names. A hardlink to
+.I /etc/shadow
+passes every name check and then meets
+.BR "chown -R" ;
+symlinks, hardlinks, device nodes and FIFOs are refused outright.
+.PP
+Archives are written by root into a
+.B root:root 0700
+directory, mode
+.BR 0600 ,
+and are never handed to the service account. That account runs untrusted mods:
+owning the directory would let a compromised server pre-create the next
+predictable archive name as a symlink for root's writer to follow, or rewrite
+what a later restore extracts as root.
+.SH "THE TIMER"
+.B minecraft-backup.timer
+runs
+.B mc backup
+on
+.BR backup.schedule .
+Change the schedule in
+.BR mc-config (5);
+it is applied at the next
+.B mc install
+or
+.BR "mc upgrade" ,
+which regenerates the drop-in.
+.PP
+.nf
+.RS
+systemctl list\-timers minecraft\-backup.timer
+systemctl start minecraft\-backup.service   # run one now
+journalctl \-u minecraft\-backup.service
+.RE
+.fi
+.SH EXAMPLES
+.PP
+.nf
+.RS
+sudo mc backup
+ls \-l /var/backups/minecraft/
+sudo mc restore /var/backups/minecraft/minecraft\-20260810\-020000.tar.gz
+sudo mc start
+.RE
+.fi
+.SH FILES
+.TP
+.I /var/backups/minecraft/
+Archives.
+.BR "root:root 0700" ,
+each archive
+.BR 0600 .
+.TP
+.I /etc/minecraft/config.toml
+.B backup.keep
+and
+.BR backup.schedule .
+See
+.BR mc-config (5).
+.TP
+.I /etc/systemd/system/minecraft-backup.timer.d/schedule.conf
+Generated drop-in carrying
+.BR OnCalendar= .
+.TP
+.I /run/minecraft/mc.lock
+Held for the duration of a backup or a restore.
+.SH SEE ALSO
+.BR mc (1),
+.BR mc-config (5),
+.BR mc-rcon (1),
+.BR mc-plugins (5),
+.BR systemd.timer (5)

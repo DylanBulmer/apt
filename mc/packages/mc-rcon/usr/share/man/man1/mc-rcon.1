@@ -1,0 +1,156 @@
+.\" The `mc rcon` subcommand. /usr/bin/rcon has its own page, rcon(1).
+.\" Named mc-rcon.1 because `mc man rcon` resolves a plugin command to
+.\" mc-<plugin name>(1) — see mc-plugins(5).
+.TH MC-RCON 1 "" "mc" "mc manual"
+.SH NAME
+mc-rcon \- RCON console and graceful shutdown for mc
+.SH SYNOPSIS
+.B mc rcon
+.RI [ command ...]
+.br
+.B mc rcon enable
+.br
+.B mc rcon disable
+.br
+.B mc rcon status
+.SH DESCRIPTION
+The
+.B mc-rcon
+package adds the
+.B mc rcon
+subcommand to
+.BR mc (1),
+and the lifecycle hooks that make a stop graceful and a backup consistent. RCON
+is Minecraft's remote console protocol, and it is what lets mc talk to a server
+that is already running.
+.PP
+With no arguments,
+.B mc rcon
+opens an interactive console. With arguments, it runs one command and prints
+the reply:
+.PP
+.RS
+.nf
+mc rcon list
+mc rcon "say server restarting in 5 minutes"
+.fi
+.RE
+.PP
+.BR enable ", " disable " and " status
+are mc's own verbs and shadow any server command of the same name. None exist
+today; if that changes,
+.B mc rcon -- <command>
+sends one literally.
+.SH COMMANDS
+.TP
+.B mc rcon \fR[\fIcommand\fR...]
+Open a console, or run one command. Needs root, or membership of the
+.B minecraft
+group.
+.TP
+.B mc rcon enable
+Provision a password if there is not one, switch RCON on in
+.IR server.properties ,
+and report the port. Needs root.
+.IP
+The server is
+.I not
+restarted for you. It reads
+.I server.properties
+at startup, so a restart is required to apply the change \(em but on a
+populated server that is a five-minute countdown, and when to spend it is the
+operator's call, not a side effect of a config command. Apply it with
+.BR "mc restart" .
+.TP
+.B mc rcon disable
+Turn RCON off. The password
+.I file
+is left alone, so a later
+.B enable
+restores the same secret rather than inventing a new one; only the copy the
+server reads is cleared. Needs root.
+.TP
+.B mc rcon status
+Report whether RCON is configured, which port it resolved, and whether a
+connection actually succeeds. Reads only files the
+.B minecraft
+group can already read, so it needs no root.
+.SH "THE PORT"
+Resolved in this order:
+.IP 1. 3
+.B rcon.port
+from
+.IR /opt/minecraft/server.properties ,
+if set.
+.IP 2. 3
+The game port
+.RB ( server-port )
+plus 10.
+.IP 3. 3
+Minecraft's stock port plus 10, that is 25575, when there is no
+.I server.properties
+yet.
+.PP
+.B mc rcon status
+prints what it resolved.
+.SH SECURITY
+.B Do not expose the RCON port.
+The protocol is unencrypted and unauthenticated beyond a single password, and
+every command it accepts runs with full operator rights on the server.
+.PP
+Two things enforce that here. The client refuses any host that resolves to a
+non-loopback address \(em including a name that resolves to both, since which
+one a connection lands on is not something the caller controls. And the
+password is read from
+.I /etc/minecraft/server.passwd
+.RB ( "root:minecraft 0640" )
+rather than from a command line, because
+.I /proc/<pid>/cmdline
+is world-readable and would expose it to every local user for the lifetime of
+the process.
+.PP
+Firewall the port anyway.
+.SH HOOKS
+Installing this package changes three things beyond the console. All of them
+are hooks core dispatches \(em see
+.BR mc-plugins (5).
+.TP
+.B pre-stop
+Stopping warns players. With at least one player online, or when the count
+cannot be determined, the stop is announced 5 minutes, 3 minutes and 1 minute
+before it happens. A provably empty server stops immediately.
+.IP
+The unit's
+.B TimeoutStopSec=
+is derived from this schedule and asserted by a test. Re-tiering the countdown
+without recomputing that value means a SIGKILL through the JVM's chunk flush.
+.TP
+.BR pre-backup ", " post-backup
+Backups are consistent. The world is flushed and held still
+.RB ( save-off ", " save-all )
+for the duration of the archive, then saving is turned back on \(em whether or
+not the archive succeeded.
+.TP
+.BR post-install ", " post-upgrade
+RCON is configured for a newly installed server, with a generated password.
+.SH FILES
+.TP
+.I /etc/minecraft/server.passwd
+The password.
+.BR "root:minecraft 0640" .
+.TP
+.I /opt/minecraft/server.properties
+Holds
+.BR enable-rcon ,
+.B rcon.port
+and
+.BR rcon.password ,
+which mc owns and re-applies after anything else writes that file.
+.TP
+.I /usr/libexec/mc/mc-rcon
+The plugin executable. Invoked by mc, not by you.
+.SH SEE ALSO
+.BR mc (1),
+.BR rcon (1),
+.BR mc-plugins (5),
+.BR mc-config (5)

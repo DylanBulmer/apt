@@ -19,7 +19,10 @@ mc/                          the product
   crates/mc-rcon/            → /usr/libexec/mc/mc-rcon, /usr/bin/rcon
   crates/mc-backup/          → /usr/libexec/mc/mc-backup
   crates/mc-mrpack/          → /usr/libexec/mc/mc-mrpack
-  packages/*/                DEBIAN metadata, units, conffiles, manifests
+  crates/xtask/              build-time only; renders mc.1 from the clap tree
+  crates/mc/man/             the prose half of mc.1 (raw roff fragments)
+  packages/*/                DEBIAN metadata, units, conffiles, manifests,
+                             usr/share/man/ (every page except mc.1)
   scripts/build.sh           builds one .deb
   tests/run.sh               tier-4 container suites; see the `testing` skill
   dist/ staging/ target/     build output, gitignored
@@ -82,6 +85,7 @@ specific command.
 | `commands/shutdown` | `ExecStop=` — dispatches `pre-stop` |
 | `commands/reload` | `ExecReload=` |
 | `commands/delete` | `mc delete` |
+| `manual` | `mc man` — which page answers a topic, and the handoff to man(1) |
 | `sources/{vanilla,paper,fabric,neoforge}` | one upstream each, behind the `Source` trait |
 
 **Plugins** — `mc-rcon` (`protocol`, `session`, `password`, `players`,
@@ -157,7 +161,10 @@ mc/crates/` is a readable index of what this code promises.
 
 | Change | Goes |
 |---|---|
-| New `mc` subcommand | `mc/crates/mc/src/cli.rs` (variant **and** `requirement()`) + `dispatch.rs` + a handler in `commands/` |
+| New `mc` subcommand | `mc/crates/mc/src/cli.rs` (variant **and** `requirement()`) + `dispatch.rs` + a handler in `commands/` — mc.1 picks it up on its own |
+| Prose in mc(1) — a new section, a file, an exit code | `mc/crates/mc/man/mc.1.{head,tail}.roff` |
+| A plugin's manual page | `mc/packages/<pkg>/usr/share/man/man1/mc-<plugin>.1` — the name `mc man` resolves to |
+| A new config key's documentation | `mc/packages/mc-server/usr/share/man/man5/mc-config.5` **and** the shipped `config.toml` (a test compares them) |
 | New server type | a module in `mc/crates/mc/src/sources/` + a `ServerType` variant |
 | New capability, new command, or a new hook consumer | **a new plugin package** — see `plugin-development` |
 | New hook event | `plugin::Event` + the dispatch site + the `plugin-development` table |

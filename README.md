@@ -16,6 +16,7 @@ console access, backups, modpacks — is another `.deb`.
 - [Quick start](#quick-start)
 - [Packages](#packages)
 - [Commands](#commands)
+  - [The manual](#the-manual)
 - [Configuration](#configuration)
 - [Plugins](#plugins)
   - [`mc-rcon` — console and graceful shutdown](#mc-rcon--console-and-graceful-shutdown)
@@ -138,6 +139,9 @@ mc backup                                  Create a timestamped backup      (mc-
 mc restore <file>                          Restore from an archive          (mc-backup)
 mc rcon [command]                          Console, or one command          (mc-rcon)
 mc rcon enable | disable | status          Manage RCON                      (mc-rcon)
+
+mc man [topic]                             Open the manual
+mc completions <shell>                     Print a shell completion script
 ```
 
 **Flags**
@@ -164,6 +168,40 @@ need no root at all if you are in the `minecraft` group:
 ```bash
 sudo usermod -aG minecraft "$USER"   # then log out and back in
 ```
+
+### The manual
+
+Every package ships man pages, and `mc man` finds the right one — including for
+a command a plugin contributed:
+
+```bash
+man mc                 # the whole command surface
+mc man                 # the same page
+mc man backup          # → mc-backup(1), from the mc-backup package
+mc man rcon            # → mc-rcon(1)
+mc man config          # → mc-config(5), the config.toml format
+man 5 mc-plugins       # writing your own plugin
+apropos mc             # everything installed
+```
+
+| Page | Covers |
+|---|---|
+| `mc(1)` | every core command and flag, the systemd contract, exit codes, file locations |
+| `mc-config(5)` | `/etc/minecraft/config.toml` — every key, its default and what it does |
+| `mc-plugins(5)` | the plugin manifest format, hook events, the provider protocol |
+| `mc-rcon(1)`, `rcon(1)` | the console, the countdown, the standalone client |
+| `mc-backup(1)` | backups, restores, the timer, what is and is not archived |
+| `mc-mrpack(1)` | installing from a Modrinth modpack |
+
+A page only exists if its package is installed, so `mc man backup` tells you to
+`apt install mc-backup` rather than describing a command you do not have.
+`mc(1)`'s command list is generated from the CLI at build time, so it cannot
+drift from what `mc` actually accepts.
+
+Minimal images (including Docker's Debian) strip `/usr/share/man` in dpkg's own
+configuration and ship no `man`. `mc-server` only *suggests* `man-db` for that
+reason; install it, and delete `/etc/dpkg/dpkg.cfg.d/docker`, if you want the
+pages inside a container.
 
 ### Upgrades
 
@@ -302,6 +340,7 @@ for the full contract.
 | `/usr/bin/rcon` | `root:root 0755` | standalone RCON client (`mc-rcon`) |
 | `/usr/libexec/mc/` | `root:root 0755` | plugin executables |
 | `/usr/lib/mc/plugins.d/` | `root:root 0644` | plugin manifests |
+| `/usr/share/man/man{1,5}/` | `root:root 0644` | manual pages, one set per package |
 | `/etc/minecraft/config.toml` | `root:root 0644` | mc's configuration (conffile) |
 | `/etc/minecraft/server.passwd` | `root:minecraft 0640` | the RCON password |
 | `/opt/minecraft/` | `minecraft:minecraft 0750` | the server and its world |
@@ -418,10 +457,17 @@ mc/tests/run.sh            # container suites (Docker) — packaging, ACLs, plug
 mc/tests/run.sh --all      # + one real install of each server type
 
 bash mc/scripts/build.sh mc-server   # → mc/dist/*.deb  (needs Debian, or the container)
+
+cargo run -p xtask -- man /tmp/man1  # render mc.1 and read it: man /tmp/man1/mc.1
 ```
 
 Inside `mc/`, `crates/` is everything compiled and `packages/<name>/` mirrors
 the target filesystem root — everything not. `mc/scripts/build.sh` joins them.
+
+`mc(1)` is generated from the clap definition by `crates/xtask` and its prose
+lives in `crates/mc/man/`; every other page is hand-written roff under
+`packages/<name>/usr/share/man/`. Adding a command to a plugin without adding
+it to that plugin's page fails a test.
 
 **Bump `Version:` in `DEBIAN/control` in the same commit as any change to a
 package.** CI publishes on every push and reprepro regenerates its indexes per

@@ -16,6 +16,11 @@ use mc_common::privilege::Requirement;
     version,
     about = "Minecraft server lifecycle manager",
     long_about = None,
+    // clap's help lists only what core implements. Both lines below are the
+    // parts an operator cannot get from it: what a plugin added, and where the
+    // prose lives.
+    after_help = "Plugins contribute commands of their own; 'mc plugins' lists them.\n\
+                  Manual: mc man   (or man mc, man mc-config)",
     // Plugins contribute subcommands that clap knows nothing about, so an
     // unrecognised name must reach the dispatcher instead of being refused
     // here.
@@ -67,6 +72,13 @@ pub enum Command {
     #[command(hide = true)]
     Reload,
 
+    /// Open the manual page for mc, a command, or a topic
+    Man {
+        /// A command name, or "config" for the configuration file format
+        #[arg(value_name = "TOPIC")]
+        topic: Option<String>,
+    },
+
     /// Print a shell completion script
     Completions {
         #[arg(value_enum)]
@@ -80,7 +92,7 @@ pub enum Command {
 
 #[derive(Debug, clap::Args)]
 pub struct InstallArgs {
-    /// Server type
+    /// Server type: vanilla, paper, fabric or neoforge
     #[arg(long = "type", value_name = "TYPE")]
     pub server_type: Option<ServerType>,
 
@@ -115,9 +127,11 @@ pub struct UpgradeArgs {
     #[arg(value_name = "PACK")]
     pub pack: Option<String>,
 
+    /// Install a missing Java runtime without prompting
     #[arg(long, short = 'y')]
     pub yes: bool,
 
+    /// Accept the Minecraft EULA (https://www.minecraft.net/eula)
     #[arg(long)]
     pub accept_eula: bool,
 
@@ -159,8 +173,10 @@ impl Command {
             // as the minecraft user.
             Command::Serve | Command::Shutdown | Command::Reload => Requirement::ServiceAccount,
 
-            // Prints text.
-            Command::Completions { .. } => Requirement::None,
+            // Prints text, or hands the terminal to man(1). Reading the manual
+            // as root would be an odd thing to require, and man is a pager
+            // running a shell — not something to hand elevated privileges to.
+            Command::Completions { .. } | Command::Man { .. } => Requirement::None,
 
             // The plugin enforces its own guard: only it knows whether the
             // subcommand reads or writes. Core refusing on its behalf would

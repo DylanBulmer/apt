@@ -556,7 +556,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "mc"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "mc-backup"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "flate2",
  "mc-common",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "mc-common"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "nix",
  "serde",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "mc-mrpack"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "mc-common",
  "serde",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "mc-rcon"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "mc-common",
  "tempfile",
@@ -717,6 +717,12 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "roff"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
 name = "rustix"
@@ -1248,6 +1254,17 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "xtask"
+version = "1.1.0"
+dependencies = [
+ "clap",
+ "mc",
+ "mc-common",
+ "roff",
+ "toml",
 ]
 
 [[package]]

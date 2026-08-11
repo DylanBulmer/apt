@@ -11,4 +11,5 @@ pub mod cli;
 pub mod commands;
 pub mod context;
 pub mod dispatch;
+pub mod manual;
 pub mod sources;

@@ -1,0 +1,33 @@
+[package]
+name = "xtask"
+description = "Build-time tooling for the mc workspace — not shipped in any package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+# The real CLI definition, not a copy of it. mc.1's SYNOPSIS and COMMANDS are
+# walked out of the same `clap::Command` the binary parses with, which is what
+# makes a new subcommand impossible to ship undocumented.
+mc = { path = "../mc" }
+clap = { version = "4", features = ["derive"] }
+# Escaping and apostrophe handling for the generated parts. The prose sections
+# are raw roff fragments and deliberately bypass it.
+roff = "1"
+
+[dev-dependencies]
+# The manual-page tests read packages/ and check it against the contract types:
+# the hook events, the ABI number and the config schema.
+mc-common = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true

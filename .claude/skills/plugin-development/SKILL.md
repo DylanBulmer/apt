@@ -154,10 +154,23 @@ take `require_root_or_group`, anything that writes takes `require_root`.
 4. **`mc/tests/run.sh`** — add the package to the build loop and bump the expected
    `.deb` count.
 5. **`mc/Cargo.toml`** — add the crate to `members`.
-6. **Tests.** Tier 1 for the logic; a case in
+6. **`mc/packages/mc-<name>/usr/share/man/man1/mc-<name>.1`** — hand-written
+   roff. **The name is not a convention you may vary:** `mc man <command>`
+   resolves a plugin command through the registry to `mc-<plugin name>(1)`, and
+   `every_plugin_command_has_a_manual_page_in_its_own_package` (tier 1) fails
+   on any other name, on a page shipped by a different package, or on one that
+   does not mention every command the manifest registers. A second command gets
+   a `.so man1/mc-<name>.1` stub file, which `build.sh` turns into a symlink
+   when it compresses — see `mc-restore.1`.
+   Model it on `mc-backup.1`: SYNOPSIS, COMMANDS, the security properties that
+   matter, FILES, SEE ALSO. `.TH` takes an empty version field so a release
+   never has to touch it.
+7. **Tests.** Tier 1 for the logic; a case in
    `mc/tests/suites/integration/plugins.sh` for install → command appears →
-   `apt remove` → command withdrawn, core still working.
-7. **Bump `Version:`** in `DEBIAN/control` in the same commit. CI publishes on
+   `apt remove` → command withdrawn, core still working; and a row in the
+   `Manual pages` section of `integration/packaging.sh` asserting the `.deb`
+   ships the page, gzipped.
+8. **Bump `Version:`** in `DEBIAN/control` in the same commit. CI publishes on
    every push touching these paths and reprepro regenerates per run, so a change
    without a bump is served under the old version and never reaches an installed
    system.

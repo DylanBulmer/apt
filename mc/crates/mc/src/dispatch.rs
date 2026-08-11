@@ -33,6 +33,7 @@ pub fn execute(ctx: &Ctx, command: Command) -> Result<()> {
         Command::Serve => commands::serve::run(ctx),
         Command::Shutdown => commands::shutdown::run(ctx),
         Command::Reload => commands::reload::run(ctx),
+        Command::Man { topic } => man(ctx, topic.as_deref()),
         Command::Completions { shell } => completions(shell),
         Command::External(args) => external(ctx, args),
     }
@@ -134,6 +135,20 @@ fn external(ctx: &Ctx, args: Vec<String>) -> Result<()> {
         _ => "",
     };
     Err(Error::config(format!("Unknown command: {name}{hint}")))
+}
+
+/// `mc man` — hand off to man(1) with the page that answers the question.
+fn man(ctx: &Ctx, topic: Option<&str>) -> Result<()> {
+    use clap::CommandFactory as _;
+    // The core command list comes from the parser for the same reason
+    // completions do: a subcommand added to `cli.rs` must resolve to mc(1)
+    // without anyone remembering to add it here.
+    let command = Cli::command();
+    let core: Vec<&str> = command.get_subcommands().map(|s| s.get_name()).collect();
+
+    let page = crate::manual::page_for(&Registry::discover(&ctx.paths), &core, topic)?;
+    // exec replaces this process, so this only returns on failure.
+    Err(crate::manual::open(&page))
 }
 
 fn completions(shell: clap_complete::Shell) -> Result<()> {

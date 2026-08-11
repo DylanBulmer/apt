@@ -73,6 +73,18 @@ pub enum Event {
 }
 
 impl Event {
+    /// Every event, for anything that has to enumerate the contract rather
+    /// than react to one instance of it — `mc-plugins(5)` is checked against
+    /// this list, so an event added here and documented nowhere fails a test.
+    pub const ALL: [Event; 6] = [
+        Event::PreStart,
+        Event::PreStop,
+        Event::PreBackup,
+        Event::PostBackup,
+        Event::PostInstall,
+        Event::PostUpgrade,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Event::PreStart => "pre-start",

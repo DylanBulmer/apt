@@ -1,0 +1,203 @@
+.\" Everything in mc.1 below the generated command list. Raw roff, emitted
+.\" verbatim by `xtask man` — escape literal hyphens as \- yourself.
+.SH PLUGIN COMMANDS
+The commands above are core's. Plugins contribute their own, which is why
+.B mc help
+and this page can disagree with what
+.B mc
+will actually accept:
+.B mc plugins
+is the authority on an installed system.
+.PP
+The packages this repository ships add:
+.TP
+.B mc rcon
+An RCON console, or one command against a running server. Also makes a stop
+warn players first and a backup consistent \(em see
+.BR mc-rcon (1).
+.TP
+.B mc backup\fR, \fBmc restore
+Timestamped archives and restores, on a timer or on demand \(em see
+.BR mc-backup (1).
+.TP
+.B mc install \fIpack\fB.mrpack
+Install or upgrade from a Modrinth modpack \(em see
+.BR mc-mrpack (1).
+.SH SYSTEMD INTEGRATION
+.B minecraft.service
+runs the server.
+.B mc start\fR, \fBstop\fR, \fBrestart\fR, \fBstatus
+and
+.B logs
+drive it through
+.BR systemctl (1)
+and
+.BR journalctl (1),
+and exist because they add what those cannot: an EULA gate, a graceful
+countdown, and a start that waits for the JVM to settle rather than reporting
+success the moment the process forks.
+.PP
+Three subcommands are the unit's own and are not for interactive use:
+.TP
+.B mc serve
+.BR ExecStart= .
+Runs the server in the foreground. This is also what a container entrypoint
+wants, on a host with no systemd at all.
+.TP
+.B mc shutdown
+.BR ExecStop= .
+Warns players, stops gracefully, waits for the world to flush.
+.TP
+.B mc reload
+.BR ExecReload= .
+Asks the running server to reload its configuration.
+.PP
+All three run as the
+.B minecraft
+user under
+.BR ProtectSystem=strict ,
+not as root, and write nothing outside
+.IR /opt/minecraft .
+.PP
+.BR "systemctl start minecraft" (1)
+bypasses mc entirely, which is why the EULA and
+.I server.properties
+gates live in
+.B mc serve
+rather than in
+.BR "mc start" .
+Starting the unit by hand is safe; it fails the same way.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 78
+.RB ( EX_CONFIG ,
+see
+.BR sysexits (3))
+Something an operator must fix: an unaccepted EULA, an unreadable
+.IR server.properties ,
+a missing
+.IR server.jar ,
+a malformed config file, or input that failed validation \(em a hostile modpack
+or a backup archive containing a symlink.
+.IP
+The unit maps this to
+.BR RestartPreventExitStatus= ,
+so
+.B mc serve
+fails visibly without restart-looping over something no restart can fix.
+.TP
+.B 1
+Anything else, including a refused privilege check and a lock held by another
+mc operation. From
+.BR "mc serve" ,
+a genuine crash \(em the unit restarts after
+.BR RestartSec= .
+.SH ENVIRONMENT
+.TP
+.B MC_ROOT
+Prefix for every path below. Exists for the test suite and for images that
+stage a tree somewhere other than
+.IR / .
+Production is unset, which means
+.IR / .
+.TP
+.B SUDO_USER
+Read only to decide whether a re-exec under
+.BR sudo (8)
+has already happened.
+.SH FILES
+.TP
+.I /etc/minecraft/config.toml
+mc's configuration. A dpkg conffile: your edits survive upgrades. See
+.BR mc-config (5).
+.TP
+.I /etc/minecraft/server.passwd
+The RCON password,
+.BR "root:minecraft 0640" .
+Never passed in argv, where
+.I /proc/<pid>/cmdline
+would expose it to every local user.
+.TP
+.I /opt/minecraft/
+The server and its world,
+.BR "minecraft:minecraft 0750" .
+The only
+.B ReadWritePaths=
+the unit grants.
+.TP
+.I /opt/minecraft/server.properties
+The game's configuration,
+.BR "minecraft:minecraft 0640" .
+Owner matters as much as mode: root-owned, the JVM can neither read nor write
+it, comes up on compiled-in defaults, and generates a stray world beside the
+real one.
+.TP
+.I /var/backups/minecraft/
+Backup archives,
+.BR "root:root 0700" .
+Deliberately not the service account: that account runs untrusted mods.
+.TP
+.I /usr/lib/mc/plugins.d/
+Plugin manifests. See
+.BR mc-plugins (5).
+.TP
+.I /usr/libexec/mc/
+Plugin executables. Not on
+.BR PATH :
+they are invoked by mc, and are not a command surface.
+.TP
+.I /run/minecraft/mc.lock
+Serialises install, upgrade, backup and restore against each other.
+.SH EXAMPLES
+Install a Paper server, unattended \(em both consents given, so nothing
+prompts:
+.PP
+.RS
+.nf
+sudo mc install \-\-type paper \-\-accept\-eula \-\-yes
+.fi
+.RE
+.PP
+Upgrade to the newest version of the configured type, taking a backup first:
+.PP
+.RS
+.nf
+sudo mc upgrade
+.fi
+.RE
+.PP
+Follow the log, then stop with a five-minute in-game countdown:
+.PP
+.RS
+.nf
+mc logs
+sudo mc stop
+.fi
+.RE
+.PP
+Read the manual for a command a plugin contributed:
+.PP
+.RS
+.nf
+mc man backup
+.fi
+.RE
+.SH SEE ALSO
+.BR mc-config (5),
+.BR mc-plugins (5),
+.BR mc-rcon (1),
+.BR mc-backup (1),
+.BR mc-mrpack (1),
+.BR rcon (1),
+.BR systemctl (1),
+.BR journalctl (1),
+.BR sysexits (3)
+.PP
+The full manual, including installation and troubleshooting:
+.UR https://apt.bulmer.dev
+.UE
+.SH AUTHOR
+Dylan Bulmer <dylan@bulmer.dev>

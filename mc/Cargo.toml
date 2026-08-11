@@ -6,6 +6,9 @@ members = [
     "crates/mc-rcon",
     "crates/mc-backup",
     "crates/mc-mrpack",
+    # Build-time only, and the one member that ships in nothing: it renders
+    # mc.1 from the clap tree for scripts/build.sh.
+    "crates/xtask",
 ]
 
 # Every crate here ships in a .deb whose Version: comes from its own
@@ -14,7 +17,7 @@ members = [
 # authority — see CLAUDE.md on why an unbumped Version: never reaches installed
 # systems.
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"

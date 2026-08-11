@@ -110,6 +110,47 @@ check_has 'the unit runs unprivileged' /lib/systemd/system/minecraft.service 'Us
 check 'no SuccessExitStatus directive' '0' \
     "$(grep -cE '^[[:space:]]*SuccessExitStatus=' /lib/systemd/system/minecraft.service)"
 
+section 'Manual pages'
+# The Debian image excludes /usr/share/man from dpkg's unpack by default, so
+# these assert what the .deb CONTAINS rather than what landed on disk — which
+# is the honest question anyway: a page missing from the archive is missing on
+# every normal machine too.
+#
+# Each listing is captured ONCE into a variable and matched with a here-string.
+# `dpkg-deb -c … | grep -q` looks equivalent and is not: grep exits at the
+# first hit, dpkg-deb dies of SIGPIPE, and `set -o pipefail` turns that into a
+# failed check for every page that is not near the end of the archive.
+listing() { dpkg-deb -c "$(ls "$MC_DIST/$1"_*.deb 2>/dev/null | head -1)" 2>/dev/null; }
+
+for pkg in mc-server mc-rcon mc-backup mc-mrpack; do
+    contents=$(listing "$pkg")
+    case "$pkg" in
+        mc-server) pages=(man1/mc.1.gz man5/mc-config.5.gz man5/mc-plugins.5.gz) ;;
+        mc-rcon)   pages=(man1/mc-rcon.1.gz man1/rcon.1.gz) ;;
+        mc-backup) pages=(man1/mc-backup.1.gz man1/mc-restore.1.gz) ;;
+        mc-mrpack) pages=(man1/mc-mrpack.1.gz) ;;
+    esac
+    for page in "${pages[@]}"; do
+        check "$pkg ships ${page##*/}" 'yes' \
+            "$(grep -qF " ./usr/share/man/$page" <<<"$contents" && echo yes || echo no)"
+    done
+done
+
+# The .so redirect must be a symlink to the COMPRESSED target: gzipping the
+# stub instead would leave `man mc-restore` chasing a name that no longer
+# exists.
+check 'mc-restore.1.gz redirects to mc-backup.1.gz' 'yes' \
+    "$(grep -qE 'mc-restore\.1\.gz -> .*mc-backup\.1\.gz' <<<"$(listing mc-backup)" \
+        && echo yes || echo no)"
+
+# The generated page is the one built from THIS source tree, not a stale copy.
+mc_page=$(dpkg-deb --fsys-tarfile "$(ls "$MC_DIST"/mc-server_*.deb | head -1)" 2>/dev/null \
+    | tar -xO ./usr/share/man/man1/mc.1.gz 2>/dev/null | gzip -dc)
+check 'mc.1 documents the man subcommand' 'yes' \
+    "$(grep -qF 'mc man' <<<"$mc_page" && echo yes || echo no)"
+check 'mc.1 documents the install flags' 'yes' \
+    "$(grep -qF 'accept\-eula' <<<"$mc_page" && echo yes || echo no)"
+
 section 'The postinst reloads systemd rather than gating on health'
 # `systemctl is-system-running` is a HEALTH check, non-zero for "degraded" —
 # any machine with one unrelated failed unit. The stub reports degraded, so if

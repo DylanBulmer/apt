@@ -55,6 +55,22 @@ for spec in "${BINARIES[@]}"; do
     cp "$src" "$dst"
 done
 
+# ── Manual pages ───────────────────────────────────────────────────────────
+#
+# mc.1's SYNOPSIS and COMMANDS are rendered from the clap tree by xtask, for
+# the same reason completions are: a subcommand added to cli.rs and nowhere
+# else still reaches the page. Everything else — the section-5 pages, and each
+# plugin's own page — is prose that lives in packages/<name>/usr/share/man/ and
+# is copied above with the rest of the tree.
+#
+# xtask is built for the HOST, not for the package's architecture. CI builds
+# every architecture on a native runner, so the two are the same thing here;
+# writing it this way is what keeps it true if that ever stops being so.
+if [[ "$PACKAGE" == "mc-server" ]]; then
+    echo "Generating mc.1..."
+    ( cd "$ROOT" && cargo run --release --locked -p xtask -- man "$STAGING_DIR/usr/share/man/man1" )
+fi
+
 # ── Dependencies ───────────────────────────────────────────────────────────
 #
 # ${shlibs:Depends} is a debhelper substitution variable, and nothing
@@ -101,6 +117,28 @@ find "$STAGING_DIR/etc"         -type f -exec chmod 644 {} \; 2>/dev/null || tru
 find "$STAGING_DIR/lib/systemd" -type f -exec chmod 644 {} \; 2>/dev/null || true
 find "$STAGING_DIR/usr/lib"     -type f -exec chmod 644 {} \; 2>/dev/null || true
 find "$STAGING_DIR/usr/share"   -type f -exec chmod 644 {} \; 2>/dev/null || true
+
+# ── Manual page compression ────────────────────────────────────────────────
+#
+# Debian policy requires man pages be gzipped, and man(1) finds them either
+# way, so this is about the archive size and about matching what dh_compress
+# would have produced. -n omits the timestamp and the original filename, which
+# is what keeps two builds of the same source byte-identical.
+#
+# A page that is only a `.so` redirect (mc-restore.1) becomes a symlink to the
+# compressed target, exactly as dh_compress does: gzipping the stub instead
+# would leave `man mc-restore` chasing a name that no longer exists.
+if [[ -d "$STAGING_DIR/usr/share/man" ]]; then
+    while IFS= read -r page; do
+        target=$(sed -n 's/^\.so \(.*\)$/\1/p' "$page")
+        if [[ -n "$target" && $(wc -l < "$page") -eq 1 ]]; then
+            rm -f "$page"
+            ln -s "../${target}.gz" "${page}.gz"
+        else
+            gzip -9n "$page"
+        fi
+    done < <(find "$STAGING_DIR/usr/share/man" -type f -name '*.[1-9]')
+fi
 
 dpkg-deb --build --root-owner-group "$STAGING_DIR" "$OUTPUT"
 echo "Built: $OUTPUT"
