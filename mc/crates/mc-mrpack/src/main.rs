@@ -17,6 +17,10 @@ use mc_common::http::{Http, UreqHttp};
 use mc_common::{Paths, ui};
 use mc_mrpack::manifest;
 
+/// Override files are config and resource packs, not server jars.
+/// A 100 MiB per-file cap stops a zip bomb from filling the disk.
+const OVERRIDE_FILE_LIMIT: u64 = 100 * 1024 * 1024;
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths = Paths::from_env();
@@ -179,7 +183,7 @@ fn extract_overrides(zip: &mut Zip, tree: &str, staging: &Path) -> Result<()> {
             std::fs::create_dir_all(parent).at(parent)?;
         }
         let mut out = std::fs::File::create(&destination).at(&destination)?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| {
+        mc_common::fsx::copy_bounded(&mut entry, &mut out, OVERRIDE_FILE_LIMIT).map_err(|e| {
             let _ = std::fs::remove_file(&destination);
             Error::rejected(format!("extracting {name}: {e}"))
         })?;

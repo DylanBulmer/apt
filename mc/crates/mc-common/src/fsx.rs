@@ -6,6 +6,7 @@
 //! read nor write it and comes up on compiled-in defaults.
 
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -64,6 +65,29 @@ pub fn owner_of(path: &Path) -> Option<(Uid, Gid)> {
     fs::metadata(path)
         .ok()
         .map(|m| (Uid::from_raw(m.uid()), Gid::from_raw(m.gid())))
+}
+
+/// Copy from `reader` to `writer`, refusing if more than `limit` bytes are available.
+///
+/// A bare `std::io::copy` has no budget: a highly compressible entry
+/// expands to hundreds of gigabytes and takes the root filesystem.
+pub fn copy_bounded<R: std::io::Read, W: std::io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+    limit: u64,
+) -> std::io::Result<u64> {
+    let mut limited = reader.take(limit);
+    let copied = std::io::copy(&mut limited, writer)?;
+    if copied == limit {
+        // Source may still have data. Read one more byte to check.
+        let mut buf = [0u8; 1];
+        if limited.read(&mut buf).map(|n| n > 0).unwrap_or(false) {
+            return Err(std::io::Error::other(format!(
+                "Output exceeded {limit} byte limit",
+            )));
+        }
+    }
+    Ok(copied)
 }
 
 /// Replace a file's contents without ever exposing a partial write.

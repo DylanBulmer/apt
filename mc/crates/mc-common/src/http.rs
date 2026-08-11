@@ -12,6 +12,11 @@ use std::path::Path;
 
 use crate::error::{Error, IoContext, Result};
 
+/// Maximum size of a single downloaded artifact.
+/// Server jars are 100–150 MB; this allows for future growth while
+/// preventing a zip-bomb download from filling the root filesystem.
+const DOWNLOAD_LIMIT: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+
 pub trait Http: Send + Sync {
     /// Fetch a URL into memory. For API responses, not artifacts.
     fn get(&self, url: &str) -> Result<Vec<u8>>;
@@ -79,6 +84,10 @@ impl UreqHttp {
             // redirects indefinitely should fail rather than hang a systemd
             // job.
             .max_redirects(5)
+            // SEC-L1: the host allowlist is checked only on the initial URL, so
+            // a 302 from an allowlisted origin to http://169.254.169.254/… must
+            // not be followed.
+            .https_only(true)
             .user_agent(concat!("mc/", env!("CARGO_PKG_VERSION")))
             .build();
         Self {
@@ -116,7 +125,7 @@ impl Http for UreqHttp {
         }
         let mut file = std::fs::File::create(dest).at(dest)?;
         let mut reader = response.body_mut().as_reader();
-        std::io::copy(&mut reader, &mut file).map_err(|e| {
+        crate::fsx::copy_bounded(&mut reader, &mut file, DOWNLOAD_LIMIT).map_err(|e| {
             // A partial file is worse than none: a later run could mistake it
             // for a cached artifact, and hash verification would reject it with
             // a confusing message about the wrong file.

@@ -96,14 +96,20 @@ pub fn enable(paths: &Paths) -> Result<bool> {
     props.set(endpoint::ENABLED, "true");
     // Loopback by default. The protocol authenticates every connection, so
     // binding elsewhere is a legitimate choice — but it should be one an
-    // operator makes deliberately, not one mc makes for them.
-    props.set(endpoint::HOST, "localhost");
+    // operator makes deliberately, not one mc makes for them. An existing
+    // host or TLS setting is preserved: resetting them on every upgrade would
+    // undo a deliberate deployment behind a TLS-terminating proxy.
+    if props.get(endpoint::HOST).is_none_or(|h| h.trim().is_empty()) {
+        props.set(endpoint::HOST, "localhost");
+    }
     props.set(endpoint::PORT, &port.to_string());
-    // TLS off because the endpoint is loopback: there is no network segment to
-    // protect, and the protocol's own default would need a PKCS12 keystore to
-    // generate, rotate and expire. Terminate TLS at a reverse proxy if the
-    // endpoint is ever exposed.
-    props.set(endpoint::TLS, "false");
+    if props.get(endpoint::TLS).is_none_or(|t| t.trim().is_empty()) {
+        // TLS off because the endpoint is loopback: there is no network segment to
+        // protect, and the protocol's own default would need a PKCS12 keystore to
+        // generate, rotate and expire. Terminate TLS at a reverse proxy if the
+        // endpoint is ever exposed.
+        props.set(endpoint::TLS, "false");
+    }
 
     // An existing secret is kept: re-running enable must not invalidate every
     // client that already holds one.
@@ -274,5 +280,37 @@ mod tests {
         assert!(resolved.url.starts_with("ws://localhost:"));
         assert!(resolved.is_loopback());
         assert_eq!(resolved.secret.len(), 40);
+    }
+
+    #[test]
+    fn a_second_enable_call_preserves_an_existing_host_and_tls_setting() {
+        // An operator running 0.0.0.0 behind a TLS-terminating proxy should not
+        // have both keys reset by the next apt upgrade of mc-mgmt.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::with_root(dir.path());
+        std::fs::create_dir_all(paths.base()).expect("base");
+
+        enable(&paths).expect("first enable");
+
+        // Simulate an operator changing the host and enabling TLS.
+        let mut props = Properties::load(&paths.server_properties());
+        props.set(endpoint::HOST, "0.0.0.0");
+        props.set(endpoint::TLS, "true");
+        props.save(&paths.server_properties()).expect("save");
+
+        // A second enable (e.g. post-upgrade) must not overwrite them.
+        enable(&paths).expect("second enable");
+        let props = Properties::load(&paths.server_properties());
+
+        assert_eq!(
+            props.get(endpoint::HOST),
+            Some("0.0.0.0"),
+            "host must survive a second enable"
+        );
+        assert_eq!(
+            props.get(endpoint::TLS),
+            Some("true"),
+            "tls must survive a second enable"
+        );
     }
 }

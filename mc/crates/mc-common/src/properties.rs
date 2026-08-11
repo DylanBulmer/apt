@@ -28,7 +28,7 @@ pub const MODE: u32 = 0o640;
 /// that hands itself a console on the operator's server. The management keys
 /// carry no defaults of their own — see [`managed_value`] — so a pack's values
 /// are discarded and whatever `mc mgmt enable` provisioned is restored.
-pub const MANAGED_KEYS: [&str; 8] = [
+pub const MANAGED_KEYS: [&str; 9] = [
     "server-port",
     "enable-rcon",
     "rcon.port",
@@ -36,6 +36,7 @@ pub const MANAGED_KEYS: [&str; 8] = [
     "management-server-enabled",
     "management-server-host",
     "management-server-port",
+    "management-server-tls-enabled",
     "management-server-secret",
 ];
 

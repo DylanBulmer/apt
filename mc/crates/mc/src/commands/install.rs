@@ -248,6 +248,19 @@ pub(super) fn merge_tree(from: &Path, to: &Path) -> Result<()> {
         let dst = to.join(entry.file_name());
         let file_type = entry.file_type().at(&src)?;
 
+        // NEVER FOLLOW A SYMLINK AT THE DESTINATION. The source-side check
+        // above guards against symlinks in the installer's output; this guards
+        // against symlinks the service account plants in MC_BASE — a dangling
+        // link to /etc/cron.d/mc would otherwise let root's write escape.
+        if std::fs::symlink_metadata(&dst)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(Error::rejected(format!(
+                "Refusing to write through a symlink at destination: {}",
+                dst.display()
+            )));
+        }
         if file_type.is_dir() {
             std::fs::create_dir_all(&dst).at(&dst)?;
             merge_tree(&src, &dst)?;
@@ -313,11 +326,12 @@ fn initialise_settings(ctx: &Ctx, java_major: u32) {
     // the file. `level-seed` is the key this step exists to expose and nothing
     // else writes it, so the presence of the line — not a value; it is
     // legitimately empty — is the honest test of success.
+    // The JVM rewrote the file under its own umask, and it may carry the RCON
+    // password. Secure it before checking the outcome — the warning branch
+    // below would otherwise leave it 0644.
+    let _ = properties::secure(&ctx.paths.server_properties());
     let props = properties::Properties::load(&ctx.paths.server_properties());
     if props.get("level-seed").is_some() {
-        // The JVM rewrote the file under its own umask, and it carries the RCON
-        // password.
-        let _ = properties::secure(&ctx.paths.server_properties());
         return;
     }
 

@@ -56,6 +56,20 @@ fn build_request(endpoint: &Endpoint) -> Result<Request> {
 impl WebSocketTransport {
     /// Connect, authenticate and hand back a ready transport.
     pub fn connect(endpoint: &Endpoint) -> Result<Self> {
+        // Refuse to send the bearer secret in cleartext to a non-loopback host.
+        // `mc mgmt status` warns about a non-loopback endpoint, but this is the
+        // one place every caller (hooks, subcommands, probe) passes through, and
+        // a warning on only one path leaves the secret on the wire everywhere else.
+        if !endpoint.is_loopback() && endpoint.url.starts_with("ws://") {
+            return Err(Error::config(format!(
+                "{} is a non-loopback endpoint without TLS.\n\
+                 The bearer secret would be sent in cleartext.\n\
+                 Fix: enable TLS (management-server-tls-enabled=true), \
+                 or bind to loopback (management-server-host=localhost)",
+                endpoint.url
+            )));
+        }
+
         let request = build_request(endpoint)?;
 
         // Connected by hand rather than through `tungstenite::connect` so the
@@ -184,5 +198,38 @@ mod tests {
             .unwrap();
         let error = handshake_error(&endpoint("s"), tungstenite::Error::Http(Box::new(response)));
         assert!(error.to_string().contains("mc mgmt enable"), "{error}");
+    }
+
+    #[test]
+    fn a_non_loopback_plaintext_endpoint_is_refused() {
+        let endpoint = Endpoint {
+            url: "ws://10.0.0.5:25585".to_string(),
+            secret: "s3cret".to_string(),
+            host: "10.0.0.5".to_string(),
+            port: 25585,
+        };
+        let error = match WebSocketTransport::connect(&endpoint) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for non-loopback plaintext"),
+        };
+        assert!(error.to_string().contains("cleartext"), "{error}");
+        assert_eq!(error.exit_code(), 78, "operator-fixable");
+    }
+
+    #[test]
+    fn a_loopback_plaintext_endpoint_is_allowed() {
+        // ws://localhost is fine — no network segment to protect.
+        // This fails at TCP connect (no server), not at our check.
+        let endpoint = Endpoint {
+            url: "ws://localhost:25585".to_string(),
+            secret: "s3cret".to_string(),
+            host: "localhost".to_string(),
+            port: 25585,
+        };
+        let error = match WebSocketTransport::connect(&endpoint) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error (no server) for loopback plaintext"),
+        };
+        assert!(!error.to_string().contains("cleartext"), "{error}");
     }
 }

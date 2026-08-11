@@ -84,7 +84,7 @@ jobs:
   #
   # EVERY PACKAGE IS Architecture-SPECIFIC NOW. The shell mc-server was
   # `Architecture: all` and was built on the amd64 leg only; all four packages
-  # now ship compiled binaries, so each leg builds all four.
+  # now ship compiled binaries, so each leg builds all five.
   build:
     needs: [test]
     if: ${{ inputs.republish != true }}
@@ -118,7 +118,7 @@ jobs:
 
       - name: Build packages
         run: |
-          for pkg in mc-server mc-rcon mc-backup mc-mrpack; do
+          for pkg in mc-server mc-rcon mc-backup mc-mrpack mc-mgmt; do
             bash scripts/build.sh "$pkg"
           done
 
@@ -138,6 +138,7 @@ jobs:
           done
 
       - name: Upload package artifacts
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.arch }}
@@ -187,6 +188,8 @@ jobs:
           run_ids=$(gh run list \
             --workflow publish.yml \
             --status success \
+            --branch main \
+            --event push \
             --limit 20 \
             --json databaseId --jq '.[].databaseId')
           if [ -z "$run_ids" ]; then

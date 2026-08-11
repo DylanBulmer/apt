@@ -116,10 +116,21 @@ pub fn install_from_pack(ctx: &Ctx, pack: &Path, cfg: &mut Config) -> Result<Rep
     // owns AFTERWARDS — so a pack cannot choose the RCON password, the RCON
     // port, or the game port.
     let staged_properties = staging.path().join("server.properties");
-    let pack_properties = std::fs::read_to_string(&staged_properties).ok();
-    if pack_properties.is_some() {
+    // Read raw bytes and convert with lossy UTF-8 so a pack shipping invalid
+    // encoding cannot skip the merge: `read_to_string` would fail on 0xFF,
+    // `.ok()` would drop the error, and the file would survive `merge_tree`
+    // verbatim, letting the pack choose managed credentials.
+    let pack_properties = if staged_properties.is_file() {
+        let bytes = std::fs::read(&staged_properties).at(&staged_properties)?;
         std::fs::remove_file(&staged_properties).at(&staged_properties)?;
-    }
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    } else if staged_properties.exists() {
+        return Err(Error::rejected(
+            "The pack ships a server.properties that is not a regular file.",
+        ));
+    } else {
+        None
+    };
 
     super::install::merge_tree(staging.path(), &ctx.paths.base())?;
 
@@ -157,4 +168,54 @@ fn record_pack(paths: &Paths, pack: &Path) -> Result<()> {
     let dir = paths.config_dir();
     std::fs::create_dir_all(&dir).at(&dir)?;
     std::fs::write(&manifest, body.to_string()).at(&manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sandbox() -> (tempfile::TempDir, Paths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::with_root(dir.path());
+        std::fs::create_dir_all(paths.base()).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        (dir, paths)
+    }
+
+    #[test]
+    fn a_non_utf8_server_properties_in_a_pack_is_merged_not_copied() {
+        // SEC-H4: a pack shipping invalid UTF-8 in server.properties would
+        // bypass the merge if read with `read_to_string` (which errors on
+        // 0xFF), leaving the file to survive `merge_tree` verbatim.
+        let (_dir, paths) = sandbox();
+        std::fs::write(paths.passwd_file(), "the-real-secret\n").unwrap();
+        properties::init(&paths).unwrap();
+
+        // Simulate a pack's server.properties with invalid UTF-8 (0xFF) in a
+        // comment, alongside attacker-chosen managed keys.
+        let malicious: Vec<u8> = b"# pack comment \xff\n\
+            rcon.password=attacker-chosen\n\
+            management-server-secret=evil\n\
+            server-port=1234\n\
+            motd=EvilPack\n"
+            .to_vec();
+
+        // This is what the fix does: read raw bytes, convert lossy, then merge.
+        let pack_properties = String::from_utf8_lossy(&malicious).into_owned();
+        properties::merge(&paths, &pack_properties).unwrap();
+
+        let live = properties::Properties::load(&paths.server_properties());
+        assert_ne!(
+            live.get("rcon.password"),
+            Some("attacker-chosen"),
+            "managed rcon.password must not come from a non-UTF-8 pack file"
+        );
+        assert_ne!(
+            live.get("management-server-secret"),
+            Some("evil"),
+            "managed management-server-secret must not come from a non-UTF-8 pack file"
+        );
+        // The pack's non-managed keys still land.
+        assert_eq!(live.get("motd"), Some("EvilPack"));
+    }
 }

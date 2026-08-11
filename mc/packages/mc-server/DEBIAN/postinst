@@ -47,7 +47,7 @@ case "$1" in
         # server comes up on compiled-in defaults and — if level-name was
         # customised — generates a stray world beside the real one. Editing the
         # file as root with a write-and-rename editor produces exactly that.
-        if [ -f "$MC_BASE/server.properties" ]; then
+        if [ -f "$MC_BASE/server.properties" ] && [ ! -L "$MC_BASE/server.properties" ]; then
             chown "$MC_USER:$MC_USER" "$MC_BASE/server.properties"
             chmod 640 "$MC_BASE/server.properties"
         fi

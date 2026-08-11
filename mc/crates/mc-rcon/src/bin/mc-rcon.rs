@@ -77,8 +77,8 @@ fn command(paths: &Paths, args: &[String]) -> Result<()> {
         //
         // They shadow any server command of the same name. None exist today,
         // and `mc rcon -- <command>` sends one literally if that changes.
-        Some("enable") => verb(paths, rest, enable),
-        Some("disable") => verb(paths, rest, disable),
+        Some("enable") => verb(paths, args, rest, enable),
+        Some("disable") => verb(paths, args, rest, disable),
         Some("status") => {
             // status only reads files the service group may already read, so it
             // does not demand root — that would protect nothing and leave `mc`
@@ -92,12 +92,12 @@ fn command(paths: &Paths, args: &[String]) -> Result<()> {
                 .map(String::as_str)
                 .skip_while(|w| *w == "--")
                 .collect();
-            interactive_or_once(paths, &command_words)
+            interactive_or_once(paths, args, &command_words)
         }
     }
 }
 
-fn verb(paths: &Paths, rest: &[String], f: fn(&Paths) -> Result<()>) -> Result<()> {
+fn verb(paths: &Paths, argv: &[String], rest: &[String], f: fn(&Paths) -> Result<()>) -> Result<()> {
     if rest.len() > 1 {
         return Err(Error::config(format!(
             "mc rcon {} takes no arguments.",
@@ -108,7 +108,7 @@ fn verb(paths: &Paths, rest: &[String], f: fn(&Paths) -> Result<()>) -> Result<(
     // so they need root: that file is 0640 owned by the service account, which
     // makes it readable by the minecraft group but writable only by its owner,
     // and /etc/minecraft is root-owned.
-    privilege::require_root(&paths.mc_bin(), rest)?;
+    privilege::require_root(&paths.mc_bin(), argv)?;
     f(paths)
 }
 
@@ -203,14 +203,14 @@ fn status(paths: &Paths) -> Result<()> {
 }
 
 /// A one-shot command, or an interactive console.
-fn interactive_or_once(paths: &Paths, words: &[&str]) -> Result<()> {
+fn interactive_or_once(paths: &Paths, argv: &[String], words: &[&str]) -> Result<()> {
     // Everything this path touches is closed to a user outside the service
     // group — MC_BASE is 0750, the password file 0640 root:minecraft, and
     // server.properties (which carries the port) 0640. Checking for an
     // installed server first would fail its file test purely because the
     // directory is untraversable, and report "no server installed" to someone
     // whose server is installed and running.
-    privilege::require_root_or_group(&paths.mc_bin(), &[])?;
+    privilege::require_root_or_group(&paths.mc_bin(), argv)?;
 
     if !paths.server_installed() {
         return Err(Error::config("No server installed. Run: mc install"));

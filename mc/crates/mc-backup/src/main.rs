@@ -1,5 +1,6 @@
 //! `/usr/libexec/mc/mc-backup` — the plugin binary.
 
+use std::io::Seek;
 use std::path::{Path, PathBuf};
 
 use mc_backup::{archive, rotation};
@@ -191,7 +192,11 @@ fn restore(paths: &Paths, argv: &[String]) -> Result<()> {
     // stopped. A hostile archive is rejected while the server is still running
     // and its directory still intact, rather than after both have been
     // dismantled.
-    let plan = archive::validate_file(&source, &root_name)?;
+    //
+    // Open ONCE — validated and extracted from the same handle, so a concurrent
+    // process cannot swap the archive between the two passes (TOCTOU).
+    let mut file = std::fs::File::open(&source).at(&source)?;
+    let plan = archive::validate(&mut file, &root_name)?;
     ui::info(format!(
         "Archive validated: {} entries.",
         plan.members.len()
@@ -204,20 +209,26 @@ fn restore(paths: &Paths, argv: &[String]) -> Result<()> {
 
     ui::info(format!("Restoring from {}...", source.display()));
 
-    // Clear the existing contents, including dotfiles.
+    // Clear the existing contents, including dotfiles. Use `file_type()`
+    // (an lstat from the DirEntry) rather than `is_dir()` (which follows
+    // symlinks): a link planted by the service account would otherwise
+    // take the `remove_dir_all` branch, fail on modern Rust, and leave
+    // a half-emptied server after the stop.
     if base.is_dir() {
         for entry in std::fs::read_dir(&base).at(&base)? {
-            let path = entry.at(&base)?.path();
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path).at(&path)?;
+            let entry = entry.at(&base)?;
+            let file_type = entry.file_type().at(entry.path())?;
+            if file_type.is_dir() {
+                std::fs::remove_dir_all(entry.path()).at(entry.path())?;
             } else {
-                std::fs::remove_file(&path).at(&path)?;
+                std::fs::remove_file(entry.path()).at(entry.path())?;
             }
         }
     }
 
     let parent = base.parent().unwrap_or(Path::new("/"));
-    let file = std::fs::File::open(&source).at(&source)?;
+    // Rewind to the start of the file for extraction.
+    file.seek(std::io::SeekFrom::Start(0)).at(&source)?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut tar = tar::Archive::new(decoder);
     // Do NOT honour the uid/gid stored in the archive: ownership is asserted
@@ -228,6 +239,24 @@ fn restore(paths: &Paths, argv: &[String]) -> Result<()> {
         .map_err(|e| Error::other(format!("extracting the archive: {e}")))?;
 
     chown_tree(&base)?;
+
+    // Re-assert the mode the postinst asserts, because the archive stores
+    // whatever mode it was created with, and `set_preserve_permissions(false)`
+    // drops only setuid/setgid/sticky, not the umask.
+    fsx::apply_owner_mode(&base, fsx::lookup_user(MC_USER), 0o750)?;
+
+    // Re-apply managed keys and secure the file: a hostile archive could store
+    // server.properties at 0644 or with attacker-chosen credentials. `merge`
+    // resolves managed values from the passwd file (not the archive), re-applies
+    // all MANAGED_KEYS unconditionally, and calls `secure` through `save`.
+    // Passing the archive's own contents as the override preserves all
+    // non-managed keys while correcting the managed ones.
+    if paths.server_properties().is_file() {
+        let text = std::fs::read_to_string(paths.server_properties())
+            .map_err(|e| Error::io("reading server.properties after restore", e))?;
+        mc_common::properties::merge(paths, &text)?;
+    }
+
     ui::info("Restore complete. Start with: mc start");
     Ok(())
 }
