@@ -132,10 +132,6 @@ pub struct UpgradeArgs {
     #[arg(long, short = 'y')]
     pub yes: bool,
 
-    /// Accept the Minecraft EULA (https://www.minecraft.net/eula)
-    #[arg(long)]
-    pub accept_eula: bool,
-
     /// Reinstall even when already at the target version
     #[arg(long)]
     pub force: bool,
@@ -226,7 +222,6 @@ mod tests {
                 version: None,
                 pack: None,
                 yes: false,
-                accept_eula: false,
                 force: false,
                 no_backup: false,
             }),

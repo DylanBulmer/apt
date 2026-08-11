@@ -31,7 +31,6 @@ pub struct UpgradeArgs {
     pub version: Option<String>,
     pub pack: Option<std::path::PathBuf>,
     pub assume_yes: bool,
-    pub accept_eula: bool,
     pub force: bool,
     /// Proceed without a pre-upgrade backup.
     ///
@@ -68,9 +67,11 @@ pub fn install(ctx: &Ctx, args: InstallArgs) -> Result<()> {
         )));
     }
 
-    // Before anything is downloaded: no point fetching several hundred MB only
-    // to refuse the licence afterwards.
-    consent(ctx, args.accept_eula)?;
+    // --accept-eula auto-populates eula.txt as a convenience, but install
+    // proceeds regardless.
+    if args.accept_eula {
+        eula::accept(&ctx.paths)?;
+    }
 
     std::fs::create_dir_all(ctx.paths.base()).at(ctx.paths.base())?;
 
@@ -118,12 +119,6 @@ pub fn install(ctx: &Ctx, args: InstallArgs) -> Result<()> {
 pub fn upgrade(ctx: &Ctx, args: UpgradeArgs) -> Result<()> {
     let mut cfg = Config::load(&ctx.paths)?;
     crate::commands::lifecycle::require_server(ctx)?;
-
-    // A no-op on any server installed through mc, which already accepted. It
-    // matters for one case: a server whose eula.txt was never written or was
-    // set back to false. `mc serve` refuses to launch that, so upgrading
-    // without this check would hand back a server that cannot start.
-    consent(ctx, args.accept_eula)?;
 
     // A modpack server needs a new pack, not a bare version bump — that would
     // replace the jar and strip the mods.
@@ -393,25 +388,6 @@ fn run_hook(ctx: &Ctx, event: Event) {
     if let Err(e) = registry.run_hook(&ctx.paths, event, &payload) {
         ui::warn(format!("{event} hook: {e}"));
     }
-}
-
-fn consent(ctx: &Ctx, accepted: bool) -> Result<()> {
-    if eula::accepted(&ctx.paths.eula()) {
-        return Ok(());
-    }
-    if !accepted {
-        eprintln!(
-            "Minecraft's End User Licence Agreement must be accepted before the server\ncan run: {}",
-            eula::EULA_URL
-        );
-        if !ui::confirm("Do you accept the Minecraft EULA?") {
-            return Err(Error::config(format!(
-                "The Minecraft EULA was not accepted; nothing was installed. ({})",
-                eula::EULA_URL
-            )));
-        }
-    }
-    eula::accept(&ctx.paths)
 }
 
 /// Hand the whole server directory to the service account.

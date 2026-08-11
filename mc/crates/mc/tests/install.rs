@@ -30,7 +30,6 @@ fn upgrade_args() -> UpgradeArgs {
         version: None,
         pack: None,
         assume_yes: true,
-        accept_eula: true,
         force: false,
         no_backup: true,
     }
@@ -128,40 +127,6 @@ fn force_reinstalls_over_an_existing_server() {
     args.force = true;
     install::install(&ctx, args).unwrap();
     assert_eq!(std::fs::read(sandbox.paths.server_jar()).unwrap(), JAR);
-}
-
-#[test]
-fn refuses_without_eula_consent_and_downloads_nothing() {
-    // The refusal must come BEFORE the download: no point fetching several
-    // hundred megabytes only to decline the licence afterwards.
-    let sandbox = Sandbox::new();
-    let http = vanilla_http(JAR_SHA1);
-    let ctx = Ctx {
-        paths: sandbox.paths.clone(),
-        http: Box::new(http),
-        service: Box::new(service(UnitState::Inactive)),
-        packages: Box::new(mc_common::packages::fake::FakePackages::new()),
-        argv: vec!["install".to_string()],
-    };
-
-    let mut args = install_args();
-    args.accept_eula = false;
-    let err = install::install(&ctx, args).unwrap_err().to_string();
-    assert!(err.contains("EULA"), "{err}");
-    assert!(!sandbox.paths.server_jar().exists());
-}
-
-#[test]
-fn eula_consent_is_not_implied_by_the_package_install_flag() {
-    // --yes consents to installing a JRE. It must never be read as consenting
-    // to a licence agreement.
-    let sandbox = Sandbox::new();
-    let ctx = ctx(&sandbox, vanilla_http(JAR_SHA1), UnitState::Inactive);
-
-    let mut args = install_args();
-    args.accept_eula = false;
-    args.assume_yes = true;
-    assert!(install::install(&ctx, args).is_err());
 }
 
 #[test]

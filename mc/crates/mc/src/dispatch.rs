@@ -61,7 +61,6 @@ fn upgrade(ctx: &Ctx, args: crate::cli::UpgradeArgs) -> Result<()> {
             version: args.version,
             pack: args.pack.map(std::path::PathBuf::from),
             assume_yes: args.yes,
-            accept_eula: args.accept_eula,
             force: args.force,
             no_backup: args.no_backup,
         },
