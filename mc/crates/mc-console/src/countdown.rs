@@ -160,17 +160,67 @@ mod tests {
         // catch: the arithmetic changes, the constant is updated, and the
         // shipped unit keeps the old value.
         let timeout_stop_sec = unit_timeout_stop_sec();
-        const NON_COUNTDOWN_BUDGET: u64 = 15 + 15 + 15 + 10;
         const SAFETY_BUFFER: u64 = 22;
-        let election_budget = mc_common::plugin::PROBE_DEADLINE.as_secs();
 
-        let worst_case =
-            total_wait(&schedule(&MARKS)).as_secs() + NON_COUNTDOWN_BUDGET + election_budget;
+        let worst_case = worst_case_stop_seconds();
         assert_eq!(worst_case, 358);
         assert!(
             worst_case + SAFETY_BUFFER <= timeout_stop_sec,
             "countdown worst case {worst_case}s + {SAFETY_BUFFER}s buffer exceeds \
              TimeoutStopSec={timeout_stop_sec}s in minecraft.service"
+        );
+    }
+
+    /// The worst-case stop path in seconds, itemised in the test above.
+    ///
+    /// Computed once so everything derived from this budget moves with it. A
+    /// second copy of the arithmetic would drift in exactly the direction these
+    /// tests exist to catch.
+    fn worst_case_stop_seconds() -> u64 {
+        // list query, 3 announcements, stop command, chunk-flush sleep.
+        const NON_COUNTDOWN_BUDGET: u64 = 15 + 15 + 15 + 10;
+        total_wait(&schedule(&MARKS)).as_secs()
+            + NON_COUNTDOWN_BUDGET
+            + mc_common::plugin::PROBE_DEADLINE.as_secs()
+    }
+
+    #[test]
+    fn the_hook_deadline_clears_the_countdown_it_has_to_contain() {
+        // The elected console's `pre-stop` hook IS most of the stop path: core
+        // spawns it and kills it at `plugin::HOOK_DEADLINE`. The election
+        // happens in core BEFORE the hook, so what the hook itself may
+        // legitimately spend is the worst case minus that one probe.
+        //
+        // A deadline below that figure kills a HEALTHY countdown partway
+        // through — the SIGKILL through the JVM's chunk flush that the
+        // countdown exists to prevent — and it does so reported as a hung
+        // plugin, which sends the operator looking at the console rather than
+        // at a budget that no longer adds up. Re-tiering MARKS is the way this
+        // happens: the derivation is prose in mc-plugins(5), the
+        // plugin-development skill and the README, and none of those fail.
+        //
+        // Both sides come from the constants themselves. A test that restated
+        // 360 or 355 would go stale exactly as silently as the prose.
+        let hook_deadline = mc_common::plugin::HOOK_DEADLINE.as_secs();
+        let election = mc_common::plugin::PROBE_DEADLINE.as_secs();
+        let inside_the_hook = worst_case_stop_seconds() - election;
+
+        assert!(
+            inside_the_hook <= hook_deadline,
+            "a healthy pre-stop spends {inside_the_hook}s, past the {hook_deadline}s \
+             plugin::HOOK_DEADLINE — core would kill a countdown that was working"
+        );
+
+        // And the bound the deadline imposes is still one the unit can absorb:
+        // after the kill, `mc shutdown` has to report it and exit inside
+        // TimeoutStopSec, or systemd SIGKILLs the JVM anyway and the bounded
+        // overrun buys nothing.
+        let timeout_stop_sec = unit_timeout_stop_sec();
+        assert!(
+            election + hook_deadline <= timeout_stop_sec,
+            "an election plus a hook killed at its deadline is {}s, past \
+             TimeoutStopSec={timeout_stop_sec}s",
+            election + hook_deadline
         );
     }
 

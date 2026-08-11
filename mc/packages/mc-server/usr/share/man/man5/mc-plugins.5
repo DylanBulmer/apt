@@ -143,6 +143,52 @@ Core invokes a hook as:
 with a JSON payload on standard input. Every hook registered for an event runs,
 in filename order, even when an earlier one failed: they are independent
 contributions, not a pipeline.
+.SS "Re-entrancy"
+A hook may run
+.BR mc ,
+and that re-entry dispatches hooks of its own. Nothing inside a single process
+can see a chain that has already crossed a process boundary, so core carries the
+nesting state in the environment \(em
+.B MC_HOOK_DEPTH
+and
+.B MC_HOOK_CHAIN
+\(em which every descendant inherits.
+.PP
+Core refuses to dispatch a hook when either bound is reached:
+.TP
+.I a cycle
+The same
+.IB plugin : event
+pair is already active further up the chain. This is the shorter and likelier
+failure: two plugins whose hooks trigger each other's events ping-pong forever
+at a depth that never reaches the limit.
+.TP
+.I depth
+Dispatch is already
+.B 2
+levels deep. One level is the normal case and two covers a hook that
+legitimately drives a core operation with hooks of its own \(em a
+.B post-install
+that takes a backup. Deeper is a plugin calling back into the operation that
+invoked it, which does not terminate on its own.
+.PP
+.B A refusal is a warning and a skip, never a failure,
+for every event including one that permits a fatal hook. Aborting a shutdown or
+an install because a plugin called back into it leaves the operator worse off
+than the missing step does. The warning names the plugin, the event and the
+chain, so what looped is readable from the journal.
+.PP
+A hook that has not exited within
+.B 360 seconds
+is killed, reaped and reported as failed. The bound is set by the stop path: the
+unit's
+.B TimeoutStopSec=380s
+covers a worst case of 358 s, of which the elected console's
+.B pre-stop
+hook is 355 s once the 3-second election outside it is subtracted. The deadline
+has to clear a legitimate countdown and still bound a hook that black-holes, so
+that one costs an overrun rather than every second systemd has before it
+SIGKILLs the JVM mid-chunk-flush.
 .SH "[[providers]]"
 One table per capability the plugin offers core, beyond a command and a hook.
 .TP
@@ -286,6 +332,45 @@ alongside
 so that
 .B mc man hello
 has something to open.
+.SH ENVIRONMENT
+Set by core on every invocation \(em command, hook, probe and source provider
+alike. Paths travel here rather than being compiled into each plugin, so a test
+can point core and its plugins at the same temporary root.
+.TP
+.B MC_ABI
+The plugin interface version core implements.
+.TP
+.B MC_ROOT
+The root every other path derives from.
+.TP
+.B MC_BASE
+The server directory, normally
+.IR /opt/minecraft .
+.TP
+.B MC_CONFIG
+The configuration directory, normally
+.IR /etc/minecraft .
+.TP
+.B MC_USER
+The service account the server runs as.
+.TP
+.B MC_HOOK_DEPTH
+How many levels of hook dispatch are already active. An integer; absent means
+zero.
+.TP
+.B MC_HOOK_CHAIN
+The
+.IB plugin : event
+pairs already active, comma-separated and outermost first \(em
+.BR mgmt:pre-stop,backup:pre-backup .
+.PP
+.B The two hook variables are inherited, never reset.
+Core passes them through unchanged to anything that is not itself a hook, and a
+plugin must pass them on to anything it runs. Clearing them, or dropping them
+while building a child's environment, hands the next process a fresh budget
+simply for shelling out to
+.BR mc ,
+which is exactly the loop the guard exists to stop.
 .SH FILES
 .TP
 .I /usr/lib/mc/plugins.d/

@@ -43,6 +43,26 @@ use crate::paths::{MC_USER, Paths};
 /// coordinated release of every package in the tree — treat it as such.
 pub const ABI: u32 = 1;
 
+/// The environment variables carrying hook nesting state across the process
+/// boundary.
+///
+/// A plugin is free to run `mc` again — `mc-backup`'s own subcommand does — and
+/// that re-entry dispatches hooks of its own. Nothing in a single process can
+/// see that, so the state travels in the environment, which every descendant
+/// inherits whether it is a hook, a probe or a plugin subcommand.
+pub const HOOK_DEPTH_ENV: &str = "MC_HOOK_DEPTH";
+pub const HOOK_CHAIN_ENV: &str = "MC_HOOK_CHAIN";
+
+/// How many levels of hook dispatch may nest before dispatch is refused.
+///
+/// One level is the normal case; two covers a hook that legitimately drives a
+/// core operation with hooks of its own (a `post-install` that takes a backup).
+/// Anything deeper is a plugin calling back into the operation that invoked it,
+/// which does not terminate on its own: on the shutdown path it burns through
+/// `TimeoutStopSec` until the JVM is SIGKILLed mid-flush, and every level costs
+/// another fork.
+pub const MAX_HOOK_DEPTH: u32 = 2;
+
 /// A point in a core operation at which plugins get to act.
 ///
 /// Kebab-case in the manifest. Unknown events are a manifest error rather than
@@ -374,6 +394,11 @@ impl Registry {
     pub fn run_hook(&self, paths: &Paths, event: Event, payload: &serde_json::Value) -> Result<()> {
         let mut fatal_error = None;
 
+        // Where this dispatch sits in a chain that may already have crossed
+        // several process boundaries — a plugin is free to invoke `mc`, and
+        // that re-entry lands back here.
+        let chain = HookChain::from_env();
+
         // Resolved only for the events that need it: electing costs a probe
         // per console, and `post-install` has no reason to pay for one.
         let elected = event
@@ -393,7 +418,20 @@ impl Registry {
             {
                 continue;
             }
-            match invoke_hook(paths, plugin, event, payload) {
+            // A loop is skipped, never fatal, and never propagated — not even
+            // for an event that permits a fatal hook. Aborting a shutdown or an
+            // install because a plugin called back into it leaves the operator
+            // worse off than the missing step does, and the warning names the
+            // plugin, the event and the chain so they can see what looped.
+            if let Some(reason) = chain.refusal(&plugin.name, event) {
+                crate::ui::warn(format!(
+                    "skipping plugin '{}' hook {event}: {reason}. Chain: {}",
+                    plugin.name,
+                    chain.describe()
+                ));
+                continue;
+            }
+            match invoke_hook(paths, plugin, event, payload, &chain) {
                 Ok(()) => {}
                 Err(e) => {
                     crate::ui::warn(format!("plugin '{}' hook {event} failed: {e}", plugin.name));
@@ -446,19 +484,107 @@ fn load_manifest(file: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
+/// Where this process sits in a chain of hook dispatches.
+///
+/// `depth` bounds recursion that grows without repeating itself; `links` — the
+/// `plugin:event` pairs already active — catches the shorter and more likely
+/// case, two plugins whose hooks trigger each other's events and ping-pong
+/// forever at a depth that never exceeds the limit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookChain {
+    depth: u32,
+    links: Vec<String>,
+}
+
+impl HookChain {
+    /// Read the state this process inherited.
+    ///
+    /// A missing or malformed value is depth 0 with an empty chain: the
+    /// variables are ours, so the only way to see a bad one is an operator
+    /// setting it by hand, and refusing every hook over that would break a
+    /// shutdown far more surely than the loop the guard exists to stop.
+    pub fn from_env() -> Self {
+        let depth = std::env::var(HOOK_DEPTH_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        let links = std::env::var(HOOK_CHAIN_ENV)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Self { depth, links }
+    }
+
+    fn link(plugin: &str, event: Event) -> String {
+        format!("{plugin}:{event}")
+    }
+
+    /// Why dispatching this hook would loop, or `None` if it is safe.
+    fn refusal(&self, plugin: &str, event: Event) -> Option<String> {
+        if self.links.contains(&Self::link(plugin, event)) {
+            return Some(format!(
+                "plugin '{plugin}' hook {event} is already running further up this chain"
+            ));
+        }
+        if self.depth >= MAX_HOOK_DEPTH {
+            return Some(format!(
+                "hook dispatch is already {} levels deep (limit {MAX_HOOK_DEPTH})",
+                self.depth
+            ));
+        }
+        None
+    }
+
+    /// The state a hook's own child processes inherit.
+    fn enter(&self, plugin: &str, event: Event) -> Self {
+        let mut links = self.links.clone();
+        links.push(Self::link(plugin, event));
+        Self {
+            depth: self.depth.saturating_add(1),
+            links,
+        }
+    }
+
+    /// The chain as an operator reads it in a warning.
+    pub fn describe(&self) -> String {
+        if self.links.is_empty() {
+            "(none)".to_string()
+        } else {
+            self.links.join(" > ")
+        }
+    }
+
+    fn env(&self) -> [(&'static str, String); 2] {
+        [
+            (HOOK_DEPTH_ENV, self.depth.to_string()),
+            (HOOK_CHAIN_ENV, self.links.join(",")),
+        ]
+    }
+}
+
 /// Environment every plugin invocation carries.
 ///
 /// Paths go through the environment rather than being recompiled into each
 /// plugin, so `MC_ROOT` reaches them too and an integration test can drive a
 /// plugin against a temp root exactly as it drives core.
-fn plugin_env(paths: &Paths) -> Vec<(&'static str, String)> {
-    vec![
+///
+/// The chain goes the same way, and is PASSED THROUGH unchanged for anything
+/// that is not itself a hook — a probe, or a plugin subcommand invoked from
+/// inside a hook. Resetting it there would hand a plugin a fresh budget simply
+/// by shelling out to `mc`, which is the loop this guard is for.
+fn plugin_env(paths: &Paths, chain: &HookChain) -> Vec<(&'static str, String)> {
+    let mut env = vec![
         ("MC_ABI", ABI.to_string()),
         ("MC_ROOT", paths.root().display().to_string()),
         ("MC_BASE", paths.base().display().to_string()),
         ("MC_CONFIG", paths.config_dir().display().to_string()),
         ("MC_USER", MC_USER.to_string()),
-    ]
+    ];
+    env.extend(chain.env());
+    env
 }
 
 /// How long a console gets to answer `console probe`.
@@ -479,7 +605,7 @@ fn probe(paths: &Paths, plugin: &Manifest) -> bool {
     let Ok(mut child) = Command::new(&plugin.bin)
         .arg("console")
         .arg("probe")
-        .envs(plugin_env(paths))
+        .envs(plugin_env(paths, &HookChain::from_env()))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .spawn()
@@ -510,18 +636,30 @@ fn probe(paths: &Paths, plugin: &Manifest) -> bool {
     }
 }
 
+/// How long one hook gets to finish before it is killed.
+///
+/// `TimeoutStopSec=380s` has to cover the whole stop path — the console
+/// election, the 300 s countdown with its announcements, the stop command and
+/// the chunk-flush sleep, 358 s worst case with a 22 s buffer. The elected
+/// console's `pre-stop` hook IS most of that path, so this bound cannot be a
+/// handful of seconds: it must clear the 355 s the hook legitimately spends
+/// once the 3 s election outside it is subtracted. 360 s does, and still leaves
+/// the unit's buffer for `mc shutdown` to report the kill and exit, so a hook
+/// that black-holes costs a bounded overrun instead of every second systemd
+/// has before it SIGKILLs the JVM mid-chunk-flush.
+pub const HOOK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(360);
+
 fn invoke_hook(
     paths: &Paths,
     plugin: &Manifest,
     event: Event,
     payload: &serde_json::Value,
+    chain: &HookChain,
 ) -> Result<()> {
-    use std::io::Write as _;
-
     let mut child = Command::new(&plugin.bin)
         .arg("hook")
         .arg(event.as_str())
-        .envs(plugin_env(paths))
+        .envs(plugin_env(paths, &chain.enter(&plugin.name, event)))
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| Error::other(format!("spawning {}: {e}", plugin.bin.display())))?;
@@ -529,18 +667,46 @@ fn invoke_hook(
     // The payload goes on stdin rather than in argv: it can be large, and argv
     // is world-readable through /proc/<pid>/cmdline — the same reason the RCON
     // password is passed by file.
+    //
+    // Handed to a thread that drops the pipe when it is done, because a plugin
+    // that never drains its stdin blocks the write once the pipe buffer fills.
+    // Writing inline would spend that time BEFORE the deadline loop starts, so
+    // the hang the deadline exists to bound would happen outside it. The thread
+    // needs no join: killing the child closes the read end, so the write fails
+    // rather than outliving the wait.
     if let Some(mut stdin) = child.stdin.take() {
         let body = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
-        let _ = stdin.write_all(&body);
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            let _ = stdin.write_all(&body);
+        });
     }
 
-    let status = child
-        .wait()
-        .map_err(|e| Error::other(format!("waiting for {}: {e}", plugin.bin.display())))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Error::other(format!("exited with {status}")))
+    let deadline = std::time::Instant::now() + HOOK_DEADLINE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(Error::other(format!("exited with {status}"))),
+            Ok(None) => {}
+            Err(e) => {
+                return Err(Error::other(format!(
+                    "waiting for {}: {e}",
+                    plugin.bin.display()
+                )));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            // Reaped as well as killed: an unreaped child of `mc serve` would
+            // sit in the process table for the lifetime of the server.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::other(format!(
+                "plugin '{}' hook {event} exceeded the {}s deadline and was killed",
+                plugin.name,
+                HOOK_DEADLINE.as_secs()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
@@ -554,7 +720,7 @@ pub fn exec_command(paths: &Paths, plugin: &Manifest, args: &[String]) -> Error 
     let err = Command::new(&plugin.bin)
         .arg("command")
         .args(args)
-        .envs(plugin_env(paths))
+        .envs(plugin_env(paths, &HookChain::from_env()))
         .exec();
     Error::other(format!("could not run {}: {err}", plugin.bin.display()))
 }
@@ -932,6 +1098,105 @@ mod tests {
         Registry::discover_in(&plugins)
             .run_hook(&paths, Event::PreBackup, &serde_json::json!({}))
             .unwrap();
+    }
+
+    // The chain tests below build a `HookChain` directly rather than through
+    // `from_env`. Reading is what production does; WRITING the variables here
+    // would set them for every other test in this binary, several of which
+    // dispatch hooks concurrently and would start refusing them. The parsing
+    // half is pinned end-to-end instead, by a real nested dispatch in
+    // `crates/mc/tests/hook_loops.rs`.
+
+    #[test]
+    fn the_chain_refuses_a_plugin_and_event_it_is_already_running() {
+        let chain = HookChain::default().enter("rcon", Event::PreStop);
+
+        let reason = chain.refusal("rcon", Event::PreStop).unwrap();
+        assert!(
+            reason.contains("already running further up this chain"),
+            "{reason}"
+        );
+        assert!(reason.contains("rcon"), "names the plugin: {reason}");
+        assert!(reason.contains("pre-stop"), "names the event: {reason}");
+
+        // A link is a plugin AND an event: a plugin whose pre-stop is running
+        // has no reason to be barred from a pre-backup it has not entered, and
+        // another plugin's pre-stop is not this one's.
+        assert!(chain.refusal("rcon", Event::PreBackup).is_none());
+        assert!(chain.refusal("backup", Event::PreStop).is_none());
+    }
+
+    #[test]
+    fn the_chain_refuses_everything_once_it_reaches_the_depth_limit() {
+        // Recursion that never repeats a plugin:event pair — a hook that
+        // installs a plugin that hooks the install — is bounded by depth
+        // alone, and the bound applies to plugins the chain has never seen.
+        let mut chain = HookChain::default();
+        for level in 0..MAX_HOOK_DEPTH {
+            chain = chain.enter(&format!("plugin{level}"), Event::PostInstall);
+        }
+
+        let reason = chain.refusal("never-seen", Event::PreStart).unwrap();
+        assert!(
+            reason.contains(&format!("limit {MAX_HOOK_DEPTH}")),
+            "{reason}"
+        );
+
+        // One level short of the limit still dispatches: nesting is bounded,
+        // not forbidden.
+        let shallower = HookChain::default().enter("plugin0", Event::PostInstall);
+        assert!(shallower.refusal("never-seen", Event::PreStart).is_none());
+    }
+
+    #[test]
+    fn the_environment_a_child_inherits_carries_the_depth_and_every_link() {
+        let chain = HookChain::default()
+            .enter("rcon", Event::PreStop)
+            .enter("backup", Event::PreBackup);
+
+        assert_eq!(
+            chain.env(),
+            [
+                (HOOK_DEPTH_ENV, "2".to_string()),
+                (
+                    HOOK_CHAIN_ENV,
+                    "rcon:pre-stop,backup:pre-backup".to_string()
+                ),
+            ]
+        );
+        // What an operator reads in the warning that names the loop.
+        assert_eq!(chain.describe(), "rcon:pre-stop > backup:pre-backup");
+        assert_eq!(HookChain::default().describe(), "(none)");
+    }
+
+    #[test]
+    fn every_plugin_invocation_carries_the_nesting_state() {
+        // Hooks, `console probe` and plugin subcommands all build their
+        // environment here, so a plugin cannot be handed a fresh budget simply
+        // by being invoked for something that is not itself a hook.
+        let paths = Paths::with_root("/tmp/sandbox");
+        let env = plugin_env(&paths, &HookChain::default().enter("rcon", Event::PreStop));
+
+        let value = |key: &str| {
+            env.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.as_str())
+                .unwrap()
+        };
+        assert_eq!(value(HOOK_DEPTH_ENV), "1");
+        assert_eq!(value(HOOK_CHAIN_ENV), "rcon:pre-stop");
+    }
+
+    #[test]
+    fn an_empty_chain_still_sets_both_variables() {
+        // Set-but-empty, not absent: a plugin reading an unset variable cannot
+        // tell "no chain" from "this core is too old to track one".
+        let env = plugin_env(&Paths::with_root("/tmp/sandbox"), &HookChain::default());
+        assert!(env.iter().any(|(k, v)| *k == HOOK_DEPTH_ENV && v == "0"));
+        assert!(
+            env.iter()
+                .any(|(k, v)| *k == HOOK_CHAIN_ENV && v.is_empty())
+        );
     }
 
     #[test]

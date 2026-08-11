@@ -475,6 +475,19 @@ any plugin that failed to load and why.
 **"plugin declares ABI N but this mc implements ABI M".** The packages are out
 of step. `sudo apt update && sudo apt upgrade` brings them back in line.
 
+**"skipping plugin ... hook".** A plugin's hook ran `mc` again and came back
+round to an event already in progress, so `mc` skipped it rather than looping.
+The warning prints the chain — `mgmt:pre-stop > backup:pre-backup` — which reads
+outermost first and names the plugin that re-entered. The operation itself
+carries on; only that one hook is skipped. A hook that shells out to `mc` must
+leave `MC_HOOK_DEPTH` and `MC_HOOK_CHAIN` in the environment it passes on, since
+that is how the chain survives the process boundary.
+
+**"hook exceeded the 360s deadline and was killed".** The plugin never exited.
+360 s clears a full five-minute shutdown countdown, so anything hitting it is
+stuck rather than slow — usually a console waiting on a server that has already
+gone away.
+
 **Java errors after a Minecraft upgrade.** Set `java.version` in
 `/etc/minecraft/config.toml`, or remove it to let mc choose.
 

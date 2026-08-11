@@ -79,9 +79,10 @@ understands, or every future kind is a flag day for the whole plugin set.
 | Console provider | `<bin> console probe` | **exit status only** — 0 means usable |
 
 Environment on every invocation: `MC_ABI`, `MC_ROOT`, `MC_BASE`, `MC_CONFIG`,
-`MC_USER`. Read paths with `Paths::from_env()` — never hardcode them, or the
-plugin ignores `MC_ROOT` and an integration test drives core against a temp root
-while the plugin writes to the real `/opt/minecraft`.
+`MC_USER`, plus `MC_HOOK_DEPTH` and `MC_HOOK_CHAIN` (see *Re-entrancy* below).
+Read paths with `Paths::from_env()` — never hardcode them, or the plugin ignores
+`MC_ROOT` and an integration test drives core against a temp root while the
+plugin writes to the real `/opt/minecraft`.
 
 The hook payload goes on stdin rather than in argv because argv is
 world-readable through `/proc/<pid>/cmdline` — the same reason the RCON password
@@ -112,6 +113,47 @@ refuses to let a plugin claim otherwise:
 
 Every registered plugin runs even when an earlier one failed: hooks are
 independent contributions, not a pipeline.
+
+## Re-entrancy
+
+A hook may run `mc` — `mc-backup`'s subcommand does — and that re-entry
+dispatches hooks of its own. No single process can see a chain that has already
+crossed a process boundary, so the state travels in the environment:
+
+| Variable | Carries |
+|---|---|
+| `MC_HOOK_DEPTH` | how many levels of hook dispatch are active (`u32`, absent = 0) |
+| `MC_HOOK_CHAIN` | the active `plugin:event` links, comma-separated, outermost first — `mgmt:pre-stop,backup:pre-backup` |
+
+**They are inherited, never reset.** Core passes them through unchanged to
+anything that is not itself a hook — a probe, a plugin subcommand invoked from
+inside a hook — and appends one link only when it dispatches a hook. Resetting
+them, or building a child's environment without them, hands the next process a
+fresh budget for shelling out to `mc`, which is the loop the guard is for.
+
+Core refuses to dispatch a hook when the same `plugin:event` is already active
+further up the chain, or when depth has reached `MAX_HOOK_DEPTH = 2`. The cycle
+check catches the likelier failure: two plugins whose hooks trigger each other's
+events ping-pong forever at a depth that never reaches the limit. Two levels is
+deliberate — one is normal, two covers a hook that legitimately drives a core
+operation with hooks of its own (a `post-install` that takes a backup).
+
+**A refusal is a warning and a skip, never a failure**, for every event
+including one that permits a fatal hook. Aborting a shutdown or an install
+because a plugin called back into it leaves the operator worse off than the
+missing step. The warning names the plugin, the event and the chain.
+
+A hook that has not exited within `HOOK_DEADLINE = 360s` is killed, reaped and
+reported as failed. That number comes from the stop path, not from taste:
+`TimeoutStopSec=380s` covers a 358 s worst case, of which the elected console's
+`pre-stop` hook is 355 s once the 3 s election outside it is subtracted. The
+deadline must clear a legitimate countdown while still bounding a hung hook — if
+`countdown::MARKS` or `PROBE_DEADLINE` move, recompute this alongside
+`TimeoutStopSec`.
+
+Nothing is required of a hook that does its own work. A hook that invokes `mc`
+or another plugin's subcommand must expect *its own* event to be skipped on
+re-entry, and must not strip these variables from the environment it passes on.
 
 ## The console election
 
