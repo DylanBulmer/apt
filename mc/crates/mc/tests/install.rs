@@ -317,6 +317,320 @@ fn paper_never_skips_an_upgrade_as_a_no_op() {
     assert_eq!(std::fs::read(sandbox.paths.server_jar()).unwrap(), JAR);
 }
 
+// ── type change ────────────────────────────────────────────────────────────
+
+#[test]
+fn neoforge_to_fabric_cleanup_removes_run_sh() {
+    // NeoForge installs run.sh, libraries/, versions/ — a Jar-based type
+    // (Fabric, Paper, Vanilla) uses java -jar server.jar instead. `mc serve`
+    // picks the launcher by checking for run.sh, so a leftover file would
+    // cause it to launch through the wrong path.
+    let sandbox = Sandbox::new();
+    sandbox.accept_eula();
+    // Simulate a NeoForge server directory (tree layout).
+    std::fs::write(sandbox.paths.run_sh(), "#!/bin/sh\n").unwrap();
+    std::fs::write(sandbox.paths.base().join("user_jvm_args.txt"), "-Xmx1G\n").unwrap();
+    std::fs::create_dir_all(sandbox.paths.base().join("libraries")).unwrap();
+    std::fs::create_dir_all(sandbox.paths.base().join("versions")).unwrap();
+    // User content that must survive.
+    std::fs::create_dir_all(sandbox.paths.base().join("world")).unwrap();
+    std::fs::write(sandbox.paths.base().join("world/level.dat"), b"world-data").unwrap();
+    std::fs::write(sandbox.paths.base().join("whitelist.json"), "[]").unwrap();
+    sandbox.write_config("[server]\ntype = \"neoforge\"\nversion = \"21.4.19\"\n");
+
+    let ctx = ctx(&sandbox, fabric_http(), UnitState::Inactive);
+
+    let mut args = upgrade_args();
+    args.server_type = Some(mc_common::ServerType::Fabric);
+    install::upgrade(&ctx, args).unwrap();
+
+    // run.sh and NeoForge tree must be gone.
+    assert!(
+        !sandbox.paths.run_sh().exists(),
+        "run.sh must be removed when switching to a Jar layout"
+    );
+    assert!(
+        !sandbox.paths.base().join("user_jvm_args.txt").exists(),
+        "user_jvm_args.txt must be removed"
+    );
+    assert!(
+        !sandbox.paths.base().join("libraries").exists(),
+        "libraries/ must be removed"
+    );
+    assert!(
+        !sandbox.paths.base().join("versions").exists(),
+        "versions/ must be removed"
+    );
+    // server.jar must be present (Fabric is Jar layout).
+    assert!(sandbox.paths.server_jar().exists(), "server.jar must exist");
+    // User content must survive.
+    assert_eq!(
+        std::fs::read(sandbox.paths.base().join("world/level.dat")).unwrap(),
+        b"world-data"
+    );
+    assert_eq!(
+        std::fs::read(sandbox.paths.base().join("whitelist.json")).unwrap(),
+        b"[]"
+    );
+    assert!(sandbox.read_config().contains("type = \"fabric\""));
+}
+
+#[test]
+fn upgrade_with_type_change_is_not_a_no_op() {
+    // Changing type (vanilla → fabric) must always proceed, even when the
+    // version resolves to the same value — the jar is different.
+    let sandbox = Sandbox::new();
+    sandbox.accept_eula().with_server();
+    sandbox.write_config("[server]\ntype = \"vanilla\"\nversion = \"1.21.4\"\n");
+
+    let ctx = ctx(&sandbox, fabric_http(), UnitState::Inactive);
+
+    let mut args = upgrade_args();
+    args.server_type = Some(mc_common::ServerType::Fabric);
+    install::upgrade(&ctx, args).unwrap();
+
+    assert!(sandbox.read_config().contains("type = \"fabric\""));
+    assert_eq!(std::fs::read(sandbox.paths.server_jar()).unwrap(), JAR);
+}
+
+#[test]
+fn upgrade_with_type_and_version_changes_both() {
+    let sandbox = Sandbox::new();
+    sandbox.accept_eula().with_server();
+    sandbox.write_config("[server]\ntype = \"vanilla\"\nversion = \"1.21.3\"\n");
+
+    let ctx = ctx(&sandbox, paper_http(), UnitState::Inactive);
+
+    let mut args = upgrade_args();
+    args.server_type = Some(mc_common::ServerType::Paper);
+    args.version = Some("1.21.4".to_string());
+    install::upgrade(&ctx, args).unwrap();
+
+    assert!(sandbox.read_config().contains("type = \"paper\""));
+    assert!(sandbox.read_config().contains("1.21.4"));
+}
+
+#[test]
+fn upgrade_preserves_user_generated_content() {
+    // Upgrade must not touch worlds, playerdata, whitelist, ops, bans, or any
+    // other user-generated content in MC_BASE.
+    let sandbox = Sandbox::new();
+    sandbox.accept_eula();
+    std::fs::write(sandbox.paths.server_jar(), b"existing").unwrap();
+    // Create user content.
+    std::fs::create_dir_all(sandbox.paths.base().join("world")).unwrap();
+    std::fs::create_dir_all(sandbox.paths.base().join("playerdata")).unwrap();
+    std::fs::write(sandbox.paths.base().join("world/level.dat"), b"world-data").unwrap();
+    std::fs::write(sandbox.paths.base().join("playerdata/uuid.dat"), b"player-data").unwrap();
+    std::fs::write(sandbox.paths.base().join("whitelist.json"), b"[\"player\"]").unwrap();
+    std::fs::write(sandbox.paths.base().join("ops.json"), b"[]").unwrap();
+    sandbox.write_config("[server]\ntype = \"vanilla\"\nversion = \"1.21.3\"\n");
+
+    let ctx = ctx(&sandbox, vanilla_http(JAR_SHA1), UnitState::Inactive);
+
+    install::upgrade(&ctx, upgrade_args()).unwrap();
+
+    // User content survives.
+    assert_eq!(
+        std::fs::read(sandbox.paths.base().join("world/level.dat")).unwrap(),
+        b"world-data"
+    );
+    assert_eq!(
+        std::fs::read(sandbox.paths.base().join("playerdata/uuid.dat")).unwrap(),
+        b"player-data"
+    );
+    assert_eq!(
+        std::fs::read(sandbox.paths.base().join("whitelist.json")).unwrap(),
+        b"[\"player\"]"
+    );
+    assert_eq!(
+        std::fs::read(sandbox.paths.base().join("ops.json")).unwrap(),
+        b"[]"
+    );
+    // server.jar was replaced.
+    assert_eq!(std::fs::read(sandbox.paths.server_jar()).unwrap(), JAR);
+}
+
+// ── data safety ────────────────────────────────────────────────────────────
+
+#[test]
+fn upgrade_with_bad_hash_leaves_server_intact() {
+    // A download that fails verification must not touch the existing server
+    // directory or pin a new version.
+    let sandbox = Sandbox::new();
+    sandbox.accept_eula();
+    std::fs::write(sandbox.paths.server_jar(), b"existing").unwrap();
+    sandbox.write_config("[server]\ntype = \"vanilla\"\nversion = \"1.21.3\"\n");
+    let ctx = ctx(&sandbox, vanilla_http(&"0".repeat(40)), UnitState::Inactive);
+
+    let err = install::upgrade(&ctx, upgrade_args()).unwrap_err();
+    assert!(matches!(err, Error::Rejected(_)), "{err}");
+    // Existing server untouched.
+    assert_eq!(std::fs::read(sandbox.paths.server_jar()).unwrap(), b"existing");
+    // Version not repinned.
+    assert!(
+        sandbox.read_config().contains("1.21.3"),
+        "version should not be repinned: {}",
+        sandbox.read_config()
+    );
+}
+
+#[test]
+fn upgrade_with_force_on_same_version_proceeds() {
+    // --force bypasses the no-op check, so a scheduled reinstall actually runs.
+    let sandbox = Sandbox::new();
+    sandbox.accept_eula().with_server();
+    sandbox.write_config("[server]\ntype = \"vanilla\"\nversion = \"1.21.4\"\n");
+
+    let ctx = ctx(&sandbox, vanilla_http(JAR_SHA1), UnitState::Inactive);
+
+    let mut args = upgrade_args();
+    args.force = true;
+    install::upgrade(&ctx, args).unwrap();
+
+    // server.jar was replaced (not the "existing" sentinel).
+    assert_eq!(std::fs::read(sandbox.paths.server_jar()).unwrap(), JAR);
+}
+
+#[test]
+fn upgrade_skips_backup_when_no_backup_flag_set_and_provider_installed() {
+    // --no-backup with mc-backup installed should skip gracefully, not error.
+    let sandbox = Sandbox::new();
+    sandbox.accept_eula().with_server();
+    sandbox.write_config("[server]\ntype = \"vanilla\"\nversion = \"1.21.3\"\n");
+
+    // Install a fake mc-backup that succeeds.
+    sandbox.install_plugin(
+        "backup",
+        r#"abi = 1
+name = "backup"
+bin = "{BIN}"
+"#,
+    );
+
+    let ctx = ctx(&sandbox, vanilla_http(JAR_SHA1), UnitState::Inactive);
+
+    let mut args = upgrade_args();
+    args.no_backup = true;
+    install::upgrade(&ctx, args).unwrap();
+
+    assert_eq!(std::fs::read(sandbox.paths.server_jar()).unwrap(), JAR);
+}
+
+#[test]
+fn upgrade_without_eula_flag_proceeds() {
+    // Upgrade no longer gates on EULA acceptance — mc serve is the real gate.
+    let sandbox = Sandbox::new();
+    // No accept_eula() call — eula.txt does not exist.
+    sandbox.with_server();
+    sandbox.write_config("[server]\ntype = \"vanilla\"\nversion = \"1.21.3\"\n");
+
+    let ctx = ctx(&sandbox, vanilla_http(JAR_SHA1), UnitState::Inactive);
+
+    install::upgrade(&ctx, upgrade_args()).unwrap();
+    assert_eq!(std::fs::read(sandbox.paths.server_jar()).unwrap(), JAR);
+}
+
+// ── eula ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn install_with_accept_eula_auto_populates_eula_txt() {
+    // --accept-eula on install auto-populates eula.txt as a convenience,
+    // so the first mc start doesn't require the flag.
+    let sandbox = Sandbox::new();
+    // No accept_eula() call — eula.txt does not exist.
+    let ctx = ctx(&sandbox, vanilla_http(JAR_SHA1), UnitState::Inactive);
+
+    let mut args = install_args();
+    args.accept_eula = true;
+    install::install(&ctx, args).unwrap();
+
+    assert!(
+        mc_common::eula::accepted(&sandbox.paths.eula()),
+        "eula.txt should be auto-populated"
+    );
+}
+
+#[test]
+fn install_without_accept_eula_proceeds() {
+    // Install no longer gates on EULA acceptance — mc serve is the real gate.
+    let sandbox = Sandbox::new();
+    let ctx = ctx(&sandbox, vanilla_http(JAR_SHA1), UnitState::Inactive);
+
+    let mut args = install_args();
+    args.accept_eula = false;
+    install::install(&ctx, args).unwrap();
+
+    assert!(sandbox.paths.server_jar().exists(), "server.jar should be installed");
+    assert!(
+        !mc_common::eula::accepted(&sandbox.paths.eula()),
+        "eula.txt should NOT be auto-populated"
+    );
+}
+
+#[test]
+fn upgrade_with_type_change_targets_latest() {
+    // --type fabric without --version should resolve to latest, not the
+    // currently installed version.
+    let sandbox = Sandbox::new();
+    sandbox.accept_eula().with_server();
+    sandbox.write_config("[server]\ntype = \"vanilla\"\nversion = \"1.21.3\"\n");
+
+    let ctx = ctx(&sandbox, fabric_http(), UnitState::Inactive);
+
+    let mut args = upgrade_args();
+    args.server_type = Some(mc_common::ServerType::Fabric);
+    // No version specified — should resolve to latest (1.21.4).
+    install::upgrade(&ctx, args).unwrap();
+
+    assert!(sandbox.read_config().contains("type = \"fabric\""));
+    assert!(
+        sandbox.read_config().contains("1.21.4"),
+        "should have resolved to latest, not 1.21.3: {}",
+        sandbox.read_config()
+    );
+}
+
+#[test]
+fn install_fabric_end_to_end() {
+    let sandbox = Sandbox::new();
+    let ctx = ctx(&sandbox, fabric_http(), UnitState::Inactive);
+
+    let mut args = install_args();
+    args.server_type = Some(mc_common::ServerType::Fabric);
+    install::install(&ctx, args).unwrap();
+
+    assert!(sandbox.paths.server_jar().exists());
+    assert!(sandbox.read_config().contains("type = \"fabric\""));
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+
+/// A `FakeHttp` serving a complete Fabric install.
+fn fabric_http() -> mc_common::http::fake::FakeHttp {
+    const FABRIC_META: &str = "https://meta.fabricmc.net/v2";
+    mc_common::http::fake::FakeHttp::new()
+        .route(
+            common::MOJANG_MANIFEST,
+            r#"{"latest": {"release": "1.21.4"},
+                "versions": [
+                  {"id": "1.21.4", "url": "https://piston-meta.test/1.21.4.json"}
+                ]}"#,
+        )
+        .route(
+            format!("{FABRIC_META}/versions/loader/1.21.4"),
+            r#"[{"loader": {"version": "0.16.10"}}]"#,
+        )
+        .route(
+            format!("{FABRIC_META}/versions/installer"),
+            r#"[{"version": "1.0.1"}]"#,
+        )
+        .route(
+            format!("{FABRIC_META}/versions/loader/1.21.4/0.16.10/1.0.1/server/jar"),
+            JAR.to_vec(),
+        )
+}
+
 /// Lets a test keep a handle on the fake while the Ctx owns a `dyn` copy.
 struct ArcService(std::sync::Arc<mc_common::service::fake::FakeService>);
 
