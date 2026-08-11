@@ -12,7 +12,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     // Nothing to delete is not a failure, but it should not prompt for a
     // destructive confirmation either.
     if !ctx.paths.server_installed() {
-        ui::info("No server installed; nothing to delete.");
+        ui::info("No server installed — nothing to delete.");
         return Ok(());
     }
 

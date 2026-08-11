@@ -111,7 +111,7 @@ pub fn install(ctx: &Ctx, args: InstallArgs) -> Result<()> {
         ctx.paths.server_properties().display()
     ));
     ui::info("the world is generated from it, and level-seed is fixed once it is.");
-    ui::info("Then: systemctl enable --now minecraft");
+    ui::info("Start with: systemctl enable --now minecraft");
     Ok(())
 }
 
@@ -300,7 +300,7 @@ pub(super) fn merge_tree(from: &Path, to: &Path) -> Result<()> {
 /// NeoForge are not.
 fn initialise_settings(ctx: &Ctx, java_major: u32) {
     let base = ctx.paths.base();
-    ui::info("Writing default server.properties (no world is generated)...");
+    ui::info("Writing default server.properties...");
 
     let java_bin = java::find_binary(ctx.paths.root(), java_major)
         .unwrap_or_else(|| std::path::PathBuf::from("java"));
@@ -336,7 +336,7 @@ fn initialise_settings(ctx: &Ctx, java_major: u32) {
     }
 
     ui::warn("Could not pre-generate server.properties.");
-    ui::warn("The server will write its own on first start; level-seed cannot be set after that.");
+    ui::warn("The server will write its own on first start — level-seed cannot be set after that.");
     if let Ok(output) = output {
         let combined = String::from_utf8_lossy(&output.stderr);
         for line in combined

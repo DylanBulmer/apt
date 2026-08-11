@@ -111,7 +111,7 @@ fn with_console(paths: &Paths, without: &str, body: HookBody) -> Result<()> {
 /// operator never asked for.
 fn post_install(paths: &Paths) -> Result<()> {
     if provision::enable(paths)? {
-        log("Management protocol enabled; it takes effect on the next start.");
+        log("Management protocol enabled — applies on next start.");
     }
     Ok(())
 }
@@ -342,14 +342,10 @@ fn enable(paths: &Paths) -> Result<()> {
     let port = provision::port(&props);
 
     if changed {
-        ui::info(format!("Management protocol enabled on port {port}."));
-        // NOT restarted automatically. The server reads server.properties at
-        // startup, and on a populated server a restart is a five-minute
-        // countdown — when to spend it is the operator's call.
-        ui::info("Restart to apply: mc restart");
+        ui::info(format!("Management protocol enabled on port {port} — restart to apply"));
     } else {
         ui::info(format!(
-            "The management protocol is already enabled on port {port}."
+            "Management protocol already enabled on port {port}."
         ));
     }
     Ok(())
@@ -357,10 +353,9 @@ fn enable(paths: &Paths) -> Result<()> {
 
 fn disable(paths: &Paths) -> Result<()> {
     if provision::disable(paths)? {
-        ui::info("Management protocol disabled.");
-        ui::info("Restart to apply: mc restart");
+        ui::info("Management protocol disabled — restart to apply");
     } else {
-        ui::info("The management protocol is already disabled.");
+        ui::info("Management protocol already disabled.");
     }
     Ok(())
 }
@@ -370,7 +365,7 @@ fn status(paths: &Paths) -> Result<()> {
 
     let Some(resolved) = endpoint::resolve(&props) else {
         ui::info("Management protocol: disabled");
-        ui::info("Enable it with: mc mgmt enable   (needs Minecraft 1.21.9 or newer)");
+        ui::info("Enable with: mc mgmt enable (needs Minecraft 1.21.9 or newer)");
         return Ok(());
     };
 
@@ -441,8 +436,8 @@ fn say(paths: &Paths, argv: &[String], words: &[String]) -> Result<()> {
     methods::say(console.client(), &words.join(" "))
 }
 
-/// Hook output goes to stderr, tagged, because core's stdout may be a pipe
-/// something else is parsing.
+/// Hook output goes to stderr, because core's stdout may be a pipe
+/// something else is parsing. `ui::info` already tags every line with `[mc]`.
 fn log(message: &str) {
-    ui::info(format!("[mgmt] {message}"));
+    ui::info(message);
 }

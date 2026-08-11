@@ -257,7 +257,7 @@ fn restore(paths: &Paths, argv: &[String]) -> Result<()> {
         mc_common::properties::merge(paths, &text)?;
     }
 
-    ui::info("Restore complete. Start with: mc start");
+    ui::info("Restore complete — start with: mc start");
     Ok(())
 }
 

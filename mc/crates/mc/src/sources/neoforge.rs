@@ -81,7 +81,7 @@ impl Source for Neoforge {
         let expected = published.split_whitespace().next().unwrap_or_default();
         verify_file(&installer, Some(expected), Algorithm::Sha512)?;
 
-        ui::info("Running the NeoForge installer (this may take a moment)...");
+        ui::info("Running NeoForge installer...");
         let java = ctx.java_bin.unwrap_or(Path::new("java"));
         let status = Command::new(java)
             .arg("-jar")

@@ -44,7 +44,7 @@ pub fn start(ctx: &Ctx, accept_eula: bool) -> Result<()> {
     // an active unit exits 0 for the same reason: a config-management run that
     // asks for a running server and finds one has not failed.
     if ctx.service.is_active(SERVICE_UNIT) {
-        ui::info("Server is already running.");
+        ui::info("Server already running.");
         return Ok(());
     }
 
@@ -56,7 +56,7 @@ pub fn start(ctx: &Ctx, accept_eula: bool) -> Result<()> {
 pub fn stop(ctx: &Ctx) -> Result<()> {
     // As in start: already stopped is the requested state, not a failure.
     if !ctx.service.is_active(SERVICE_UNIT) {
-        ui::info("Server is not running.");
+        ui::info("Server not running.");
         return Ok(());
     }
     // The in-game countdown is `ExecStop=`'s job, so that it also runs for a

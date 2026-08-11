@@ -118,24 +118,18 @@ fn enable(paths: &Paths) -> Result<()> {
     let port = properties::rcon_port(&Properties::load(&paths.server_properties()));
 
     if changed {
-        ui::info(format!("RCON enabled on port {port}."));
-        // NOT restarted automatically. The server reads server.properties at
-        // startup, so a restart is required — but on a populated server that is
-        // a five-minute countdown, and choosing when to spend it is the
-        // operator's call, not a side effect of a config command.
-        ui::info("Restart to apply: mc restart");
+        ui::info(format!("RCON enabled on port {port} — restart to apply"));
     } else {
-        ui::info(format!("RCON is already enabled on port {port}."));
+        ui::info(format!("RCON already enabled on port {port}."));
     }
     Ok(())
 }
 
 fn disable(paths: &Paths) -> Result<()> {
     if set_enabled(paths, false)? {
-        ui::info("RCON disabled.");
-        ui::info("Restart to apply: mc restart");
+        ui::info("RCON disabled — restart to apply");
     } else {
-        ui::info("RCON is already disabled.");
+        ui::info("RCON already disabled.");
     }
     Ok(())
 }
@@ -173,7 +167,7 @@ fn status(paths: &Paths) -> Result<()> {
     let props = Properties::load(&paths.server_properties());
     let enabled = props.get("enable-rcon").unwrap_or("unset");
     let port = properties::rcon_port(&props);
-    ui::info(format!("enable-rcon: {enabled} (port {port})"));
+    ui::info(format!("RCON: {enabled} (port {port})"));
 
     if !password::exists(paths) {
         ui::warn(format!(
@@ -384,7 +378,7 @@ fn post_install(paths: &Paths) -> Result<()> {
     }
     if set_enabled(paths, true)? {
         ui::info(format!(
-            "RCON enabled on port {}. Restart to apply: mc restart",
+            "RCON enabled on port {} — restart to apply",
             properties::rcon_port(&Properties::load(&paths.server_properties()))
         ));
     }
