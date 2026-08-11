@@ -20,6 +20,8 @@ console access, backups, modpacks — is another `.deb`.
 - [Configuration](#configuration)
 - [Plugins](#plugins)
   - [`mc-rcon` — console and graceful shutdown](#mc-rcon--console-and-graceful-shutdown)
+  - [`mc-mgmt` — the management protocol console](#mc-mgmt--the-management-protocol-console)
+  - [Two consoles, one server](#two-consoles-one-server)
   - [`mc-backup` — backups and restores](#mc-backup--backups-and-restores)
   - [`mc-mrpack` — Modrinth modpacks](#mc-mrpack--modrinth-modpacks)
   - [Writing your own](#writing-your-own)
@@ -102,10 +104,11 @@ afterwards — edit the file before `systemctl enable --now minecraft`.
 |---|---|
 | **`mc-server`** | the `mc` command, the systemd unit, install/upgrade/lifecycle. Everything below is optional. |
 | `mc-rcon` | `mc rcon`, the in-game shutdown countdown, world flushing around backups, `/usr/bin/rcon` |
+| `mc-mgmt` | `mc mgmt` — the same console work over Minecraft 1.21.9's management protocol, plus allowlist, bans and operators |
 | `mc-backup` | `mc backup`, `mc restore`, and the scheduled backup timer |
 | `mc-mrpack` | `mc install pack.mrpack` — Modrinth modpacks |
 
-`mc-server` *Recommends* all three, so a plain `apt install mc-server` gives you
+`mc-server` *Recommends* all four, so a plain `apt install mc-server` gives you
 everything. Install only what you want with `--no-install-recommends`, and add
 or remove a plugin at any time:
 
@@ -129,7 +132,7 @@ mc upgrade <new.mrpack>                    Upgrade from a new modpack       (mc-
 mc delete                                  Permanently remove the server
 
 mc start [--accept-eula]                   Start the server
-mc stop                                    Stop it (with a countdown, if mc-rcon)
+mc stop                                    Stop it (with a countdown, if a console is installed)
 mc restart [--accept-eula]                 Restart it
 mc status                                  Service state
 mc logs                                    Follow the server log
@@ -139,6 +142,10 @@ mc backup                                  Create a timestamped backup      (mc-
 mc restore <file>                          Restore from an archive          (mc-backup)
 mc rcon [command]                          Console, or one command          (mc-rcon)
 mc rcon enable | disable | status          Manage RCON                      (mc-rcon)
+mc mgmt status | players | say <text>      Management protocol console      (mc-mgmt)
+mc mgmt enable | disable                   Manage the management endpoint   (mc-mgmt)
+mc mgmt allowlist | bans | ip-bans | operators
+                                           Moderation, 1.21.9+              (mc-mgmt)
 
 mc man [topic]                             Open the manual
 mc completions <shell>                     Print a shell completion script
@@ -179,6 +186,7 @@ man mc                 # the whole command surface
 mc man                 # the same page
 mc man backup          # → mc-backup(1), from the mc-backup package
 mc man rcon            # → mc-rcon(1)
+mc man mgmt            # → mc-mgmt(1)
 mc man config          # → mc-config(5), the config.toml format
 man 5 mc-plugins       # writing your own plugin
 apropos mc             # everything installed
@@ -190,6 +198,7 @@ apropos mc             # everything installed
 | `mc-config(5)` | `/etc/minecraft/config.toml` — every key, its default and what it does |
 | `mc-plugins(5)` | the plugin manifest format, hook events, the provider protocol |
 | `mc-rcon(1)`, `rcon(1)` | the console, the countdown, the standalone client |
+| `mc-mgmt(1)` | the management protocol, the console election, moderation |
 | `mc-backup(1)` | backups, restores, the timer, what is and is not archived |
 | `mc-mrpack(1)` | installing from a Modrinth modpack |
 
@@ -244,8 +253,10 @@ schedule = "daily"      # systemd OnCalendar= syntax
 
 **`/opt/minecraft/server.properties`** — what the *game* is: port, seed, MOTD,
 difficulty, RCON. The server reads and rewrites this file, so `mc` keeps no copy
-of anything in it. Edit it directly; `mc` re-applies only the four keys it owns
-(`server-port`, `enable-rcon`, `rcon.port`, `rcon.password`).
+of anything in it. Edit it directly; `mc` re-applies only the eight keys it owns
+(`server-port`, `enable-rcon`, `rcon.port`, `rcon.password`,
+`management-server-enabled`, `management-server-host`, `management-server-port`,
+`management-server-secret`).
 
 Changing `backup.schedule` takes effect on the next `mc install`/`mc upgrade`,
 which regenerates the timer drop-in at
@@ -280,6 +291,58 @@ changes three things beyond the console:
 
 The port is `rcon.port` from `server.properties` if set, otherwise your game
 port + 10. `mc rcon status` reports what it resolved.
+
+### `mc-mgmt` — the management protocol console
+
+```bash
+mc mgmt status             # is the endpoint up, and does the secret work?
+mc mgmt players            # who is online, one name per line
+mc mgmt say "back in 10"   # broadcast
+sudo mc mgmt enable        # provision a secret and switch it on
+sudo mc mgmt operators add jeb_
+```
+
+Minecraft **1.21.9** added a management server of its own: JSON-RPC over a
+WebSocket, authenticated with a bearer secret. It does the same three things
+`mc-rcon` does — the shutdown countdown, flushing the world around a backup,
+configuring itself on install — and does them better, because a player count
+comes back as a list rather than a sentence to parse and a player name is sent
+as data rather than pasted into a command string.
+
+It also adds moderation `mc` has never had: `mc mgmt allowlist`, `bans`,
+`ip-bans` and `operators`, each with `add` and `remove`.
+
+The endpoint `mc mgmt enable` configures is loopback with TLS off, and the
+secret lives in `server.properties` (0640 `minecraft:minecraft`) — never in a
+command line. Bind it elsewhere and put it behind a TLS-terminating reverse
+proxy if other clients need it, and set `management-server-allowed-origins` when
+you do.
+
+Servers older than 1.21.9 do not have this protocol. `mc mgmt` says so instead
+of guessing.
+
+### Two consoles, one server
+
+**Install both `mc-rcon` and `mc-mgmt`.** They do not conflict, and you do not
+choose between them: `mc` asks each console whether it can actually talk to
+*this* server and uses the best one that answers. `mc-mgmt` outranks `mc-rcon`,
+so a 1.21.9-or-newer server uses the management protocol and everything older
+falls back to RCON — with no per-host configuration, which is what makes a
+mixed-version fleet one set of packages.
+
+Only the winner runs the countdown and the backup flush, so you never get two
+countdowns. Both keep their own credentials provisioned, so upgrading a server
+past 1.21.9 switches consoles with nothing to do by hand.
+
+```bash
+mc plugins
+#   console:  mgmt (priority 20) — elected
+#   console:  rcon (priority 10) — standing down
+```
+
+`not answering` next to both means nothing can reach the server: it is stopped,
+or RCON is off and the management endpoint is not enabled. `mc rcon status` and
+`mc mgmt status` say which.
 
 ### `mc-backup` — backups and restores
 
@@ -374,7 +437,7 @@ there is nothing to drive.
 
 ```bash
 sudo mc delete                          # the server and its secrets; keeps backups
-sudo apt remove mc-server mc-rcon mc-backup mc-mrpack
+sudo apt remove mc-server mc-rcon mc-mgmt mc-backup mc-mrpack
 sudo apt purge  mc-server               # also removes /etc/minecraft/config.toml
 ```
 
@@ -426,6 +489,11 @@ a player count that could not be determined. `mc logs` shows which.
 - The RCON password is generated (192 bits), stored `0640 root:minecraft`, and
   passed to the client by file — never in argv, which is world-readable through
   `/proc/<pid>/cmdline`.
+- The management endpoint's bearer secret is generated, read from
+  `server.properties` (`0640 minecraft:minecraft`) at the point of use, and
+  likewise never appears on a command line. It is configured on loopback, and
+  every call is a method name with typed parameters, so there is no command
+  string for a player name to be injected into.
 - Downloaded artifacts are verified against the digest their index publishes,
   and an index that publishes none is a refusal rather than a skip. (The one
   exception is Fabric's server jar, which upstream publishes no hash for; it is

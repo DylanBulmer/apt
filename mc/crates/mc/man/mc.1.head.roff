@@ -46,13 +46,18 @@ is the
 .IR server 's:
 port, seed, MOTD, difficulty, RCON. The JVM reads and rewrites that file, so mc
 keeps no copy of anything in it \(em edit it directly. mc re-applies only the
-four keys it owns
-.RB ( server-port ,
-.BR enable-rcon ,
+keys it owns: the game port
+.RB ( server-port ),
+and both consoles' credentials
+.RB ( enable-rcon ,
 .BR rcon.port ,
-.BR rcon.password ),
-including after a modpack merges its own settings, so a pack cannot choose the
-RCON password.
+.BR rcon.password ,
+.BR management-server-enabled ,
+.BR management-server-host ,
+.BR management-server-port ,
+.BR management-server-secret ).
+They are re-applied after a modpack merges its own settings, so a pack cannot
+choose either console's credential, or switch one on with a secret of its own.
 .SS Privilege
 Commands that write the server directory, the config or the unit state need
 root. When you forget

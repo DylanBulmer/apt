@@ -44,6 +44,58 @@ check_output 'mc plugins lists backup'  'backup'  mc plugins
 check_output 'mc plugins lists mrpack'  'mrpack'  mc plugins
 check_output 'mrpack claims its extension' 'mrpack' mc plugins
 
+section 'Two consoles coexist, and each announces its own priority'
+# The election itself — that exactly one console runs a console-exclusive hook —
+# is tier 1, in mc-common's `only_the_elected_console_runs_a_console_exclusive_
+# hook`, where fixture plugins can be made to answer or refuse on demand. What
+# only a real install can show is that both packages' manifests parse, register
+# a console provider each, and are reported to the operator with the priorities
+# they actually shipped.
+install_plugins mgmt
+check_output 'mc plugins lists mgmt'  'mgmt'  mc plugins
+check_output 'rcon registers a console at priority 10' 'console:  rcon (priority 10)' mc plugins
+check_output 'mgmt registers a console at priority 20' 'console:  mgmt (priority 20)' mc plugins
+
+section 'With no server to answer, nothing is elected'
+# There is no JVM in this container, so both probes fail. That is the state
+# under test: `mc plugins` must SAY so. Silently electing the highest-priority
+# console regardless would make "my countdown stopped happening" a mystery,
+# because the output would name a console that cannot reach anything.
+#
+# Written explicitly rather than left to a missing file, so the assertion is
+# about the protocols being switched off rather than about server.properties
+# being absent.
+printf 'server-port=25565\nenable-rcon=false\nmanagement-server-enabled=false\n' \
+    > /opt/minecraft/server.properties
+check_output 'rcon reports itself unanswering' 'rcon (priority 10) — not answering' mc plugins
+check_output 'mgmt reports itself unanswering' 'mgmt (priority 20) — not answering' mc plugins
+check_false 'no console claims to be elected' \
+    bash -c 'mc plugins | grep -qF -- "— elected"'
+check_false 'and none is told to stand down for another' \
+    bash -c 'mc plugins | grep -qF -- "— standing down"'
+
+section 'A probe answers with an exit status and nothing else'
+# Core probes every console on the shutdown path. A probe that printed anything
+# would put a line in the journal each time the server stops, on every machine
+# whose server is too old for the protocol — which is the ordinary case, not a
+# fault.
+check_false 'the mgmt probe fails while the protocol is off' \
+    /usr/libexec/mc/mc-mgmt console probe
+check 'the mgmt probe is silent on stdout' '' \
+    "$(/usr/libexec/mc/mc-mgmt console probe 2>/dev/null)"
+check_false 'the rcon probe fails while RCON is off' \
+    /usr/libexec/mc/mc-rcon console probe
+check 'the rcon probe is silent on stdout' '' \
+    "$(/usr/libexec/mc/mc-rcon console probe 2>/dev/null)"
+
+section 'Removing one console leaves the other and leaves core working'
+dpkg -r mc-mgmt >/dev/null 2>&1
+check_false 'the mgmt manifest is gone' test -f /usr/lib/mc/plugins.d/mgmt.toml
+check_false 'the mgmt binary is gone'   test -f /usr/libexec/mc/mc-mgmt
+check_output 'mc mgmt is no longer dispatchable' 'Unknown command' mc mgmt
+check_output "rcon's console line survives" 'console:  rcon (priority 10)' mc plugins
+check_true   'core still works'          mc --version
+
 section 'Only a registered name is dispatchable'
 # Resolving to some executable is not sufficient. Without the registry, an
 # internal entry point would be reachable from the command line, skipping the

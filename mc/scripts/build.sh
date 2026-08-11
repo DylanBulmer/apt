@@ -35,6 +35,7 @@ case "$PACKAGE" in
     mc-rcon)    BINARIES=("mc-rcon:usr/libexec/mc/mc-rcon" "rcon:usr/bin/rcon") ;;
     mc-backup)  BINARIES=("mc-backup:usr/libexec/mc/mc-backup") ;;
     mc-mrpack)  BINARIES=("mc-mrpack:usr/libexec/mc/mc-mrpack") ;;
+    mc-mgmt)    BINARIES=("mc-mgmt:usr/libexec/mc/mc-mgmt") ;;
     *)          echo "Unknown package: $PACKAGE" >&2; exit 1 ;;
 esac
 

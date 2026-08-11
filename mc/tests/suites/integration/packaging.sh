@@ -10,7 +10,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../lib/assert.sh"
 install_all
 
 section 'Control metadata'
-for pkg in mc-server mc-rcon mc-backup mc-mrpack; do
+for pkg in mc-server mc-rcon mc-mgmt mc-backup mc-mrpack; do
     check "$pkg is installed" 'install ok installed' \
         "$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | sed 's/^[^ ]* [^ ]* //;s/^/install ok /')"
     # The architecture must be a real one. `any` is a source-level wildcard and
@@ -23,7 +23,7 @@ done
 section 'Dependency substitution'
 # ${shlibs:Depends} is a debhelper variable and nothing substitutes it under
 # plain dpkg-deb. Shipping it literally produces a package apt refuses.
-for pkg in mc-server mc-rcon mc-backup mc-mrpack; do
+for pkg in mc-server mc-rcon mc-mgmt mc-backup mc-mrpack; do
     deps=$(dpkg-query -W -f='${Depends}' "$pkg" 2>/dev/null)
     check "$pkg has no unsubstituted variable" 'no' \
         "$([[ "$deps" == *'${'* ]] && echo yes || echo no)"
@@ -33,7 +33,7 @@ done
 
 section 'Recommends make a bare install batteries-included'
 recommends=$(dpkg-query -W -f='${Recommends}' mc-server 2>/dev/null)
-for plugin in mc-rcon mc-backup mc-mrpack; do
+for plugin in mc-rcon mc-mgmt mc-backup mc-mrpack; do
     check "mc-server recommends $plugin" 'yes' \
         "$([[ "$recommends" == *"$plugin"* ]] && echo yes || echo no)"
 done
@@ -41,7 +41,7 @@ done
 section 'Installed layout'
 check_true 'the dispatcher is installed'   test -x /usr/bin/mc
 check_true 'the standalone client is installed' test -x /usr/bin/rcon
-for plugin in mc-rcon mc-backup mc-mrpack; do
+for plugin in mc-rcon mc-mgmt mc-backup mc-mrpack; do
     check_true "$plugin binary is executable" test -x "/usr/libexec/mc/$plugin"
 done
 # The shell implementation is gone. A leftover .sh would be dead code that an
@@ -73,8 +73,9 @@ check 'config dir owner'        'root:root'          "$(file_owner /etc/minecraf
 
 section 'Program files are not writable by anyone but root'
 for f in /usr/bin/mc /usr/bin/rcon /usr/libexec/mc/mc-rcon \
-         /usr/libexec/mc/mc-backup /usr/libexec/mc/mc-mrpack \
-         /usr/lib/mc/plugins.d/rcon.toml /etc/minecraft/config.toml; do
+         /usr/libexec/mc/mc-mgmt /usr/libexec/mc/mc-backup /usr/libexec/mc/mc-mrpack \
+         /usr/lib/mc/plugins.d/rcon.toml /usr/lib/mc/plugins.d/mgmt.toml \
+         /etc/minecraft/config.toml; do
     mode=$(file_mode "$f")
     check "$f group/other not writable" 'yes' \
         "$([[ $(( 8#$mode & 8#022 )) -eq 0 ]] && echo yes || echo no)"
@@ -102,7 +103,7 @@ check_has 'ExecReload is mc reload'  /lib/systemd/system/minecraft.service 'Exec
 check_has 'exit 78 prevents restart' /lib/systemd/system/minecraft.service 'RestartPreventExitStatus=78'
 # Asserted here as well as in the cargo test, because the value and the
 # arithmetic it comes from live in different repositories of truth.
-check_has 'stop timeout matches the countdown' /lib/systemd/system/minecraft.service 'TimeoutStopSec=375s'
+check_has 'stop timeout matches the countdown' /lib/systemd/system/minecraft.service 'TimeoutStopSec=380s'
 check_has 'the unit runs unprivileged' /lib/systemd/system/minecraft.service 'User=minecraft'
 # Grepped as a DIRECTIVE, not as a string: the comment above it in the unit
 # explains at length why there is no SuccessExitStatus=, and a naive search
@@ -122,11 +123,12 @@ section 'Manual pages'
 # failed check for every page that is not near the end of the archive.
 listing() { dpkg-deb -c "$(ls "$MC_DIST/$1"_*.deb 2>/dev/null | head -1)" 2>/dev/null; }
 
-for pkg in mc-server mc-rcon mc-backup mc-mrpack; do
+for pkg in mc-server mc-rcon mc-mgmt mc-backup mc-mrpack; do
     contents=$(listing "$pkg")
     case "$pkg" in
         mc-server) pages=(man1/mc.1.gz man5/mc-config.5.gz man5/mc-plugins.5.gz) ;;
         mc-rcon)   pages=(man1/mc-rcon.1.gz man1/rcon.1.gz) ;;
+        mc-mgmt)   pages=(man1/mc-mgmt.1.gz) ;;
         mc-backup) pages=(man1/mc-backup.1.gz man1/mc-restore.1.gz) ;;
         mc-mrpack) pages=(man1/mc-mrpack.1.gz) ;;
     esac

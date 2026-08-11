@@ -69,7 +69,7 @@ docker run --rm \
         set -e
         cp -a /src/. /build/
         rm -rf /build/dist /build/staging
-        for pkg in mc-server mc-rcon mc-backup mc-mrpack; do
+        for pkg in mc-server mc-rcon mc-backup mc-mrpack mc-mgmt; do
             bash scripts/build.sh "$pkg" >/dev/null
         done
         cp dist/*.deb /dist/'
@@ -79,7 +79,7 @@ ls -1 "$WORK/dist" | sed 's/^/    /'
 # is a suite failing on a glob that matched nothing, several minutes and one
 # wrong diagnosis later.
 built=$(ls -1 "$WORK/dist"/*.deb 2>/dev/null | wc -l | tr -d ' ')
-[[ "$built" -eq 4 ]] || { echo "expected 4 .deb files, got $built" >&2; exit 1; }
+[[ "$built" -eq 5 ]] || { echo "expected 5 .deb files, got $built" >&2; exit 1; }
 
 # Mount the repo read-only: a suite must never be able to edit the tree it is
 # testing.
@@ -95,7 +95,7 @@ docker_run() {
 # to configure a package whose dependency is not configured yet.
 install_all='
     dpkg -i /dist/mc-server_*.deb >/dev/null 2>&1
-    dpkg -i /dist/mc-rcon_*.deb /dist/mc-backup_*.deb /dist/mc-mrpack_*.deb >/dev/null 2>&1
+    dpkg -i /dist/mc-rcon_*.deb /dist/mc-mgmt_*.deb /dist/mc-backup_*.deb /dist/mc-mrpack_*.deb >/dev/null 2>&1
 '
 
 if [[ "$SHELL_ONLY" == yes ]]; then

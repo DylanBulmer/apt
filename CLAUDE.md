@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Read the skills first
 
-Three skills in `.claude/skills/` carry most of the operational detail, and
+Four skills in `.claude/skills/` carry most of the operational detail, and
 using them is much cheaper than rediscovering it:
 
 - **`file-structure`** — which crate owns which concern, how `mc/crates/` and
@@ -18,6 +18,11 @@ using them is much cheaper than rediscovering it:
 - **`plugin-development`** — the ABI-1 contract: manifest schema, hook events,
   the source-provider protocol, and what must stay in core. Use it before adding
   a subcommand, a hook, or a package.
+- **`git-safety`** — what each git operation here destroys or publishes: why
+  `git checkout -- <file>` has no undo, why a new package is entirely untracked,
+  and why pushing to `main` signs and indexes packages into the live repository.
+  Use it before any command that discards, moves, resets, stashes, cleans,
+  commits or pushes.
 
 The `README.md` is the user-facing manual (install, configure, troubleshoot).
 Don't restate it here; do check it for drift when behaviour changes.
@@ -46,21 +51,36 @@ pinned by `mc/rust-toolchain.toml`. Publishing is normally CI's job — pushing 
 
 ## Repository layout
 
-Two components. **`mc/`** is the product: the cargo workspace (`crates/`, which
-includes `xtask` — build-time tooling that ships in nothing), the Debian
-packaging trees (`packages/`), its tests and its build script.
+Two components. **`mc/`** is the product: the cargo workspace (`crates/`), the
+Debian packaging trees (`packages/`), its tests and its build script. Three
+crates ship in no package: `mc-common` and `mc-console` are libraries linked
+statically by the binaries that need them, and `xtask` is build-time tooling.
 **`apt/`** is the distribution: reprepro config, the signing key, `publish.sh`,
 and the nginx image that serves the repository — `apt/` is that image's whole
 build context, which is why its `COPY` paths carry no prefix.
 
 ## Architecture
 
-**Four packages joined by a plugin contract.** `mc-server` ships the dispatcher
-(`/usr/bin/mc`); `mc-rcon`, `mc-backup` and `mc-mrpack` each drop a TOML
-manifest into `/usr/lib/mc/plugins.d/` and an executable into
+**Five packages joined by a plugin contract.** `mc-server` ships the dispatcher
+(`/usr/bin/mc`); `mc-rcon`, `mc-mgmt`, `mc-backup` and `mc-mrpack` each drop a
+TOML manifest into `/usr/lib/mc/plugins.d/` and an executable into
 `/usr/libexec/mc/`. Core discovers manifests at startup and invokes plugins
 across a process boundary — `<bin> command <name>` for a subcommand,
 `<bin> hook <event>` with JSON on stdin for a hook.
+
+**The console is elected, never named.** `mc-rcon` (RCON, every version) and
+`mc-mgmt` (the management protocol, 1.21.9+) both declare
+`[[providers]] kind = "console"` with a `priority`; core elects the highest one
+whose `<bin> console probe` exits 0 within 3 seconds — anything else, including
+a hang, is "no" and the next one down takes over. Installing both is the
+intended arrangement, and nothing in core knows either name. Only the elected
+console runs `pre-stop`, `pre-backup` and `post-backup`, because two countdowns
+are worse than one and a second save-on can restore saving mid-archive; every
+installed console runs `post-install` and `post-upgrade`, so losing an election
+never leaves a machine with nothing that works. An unknown provider `kind` is
+reported by `mc plugins` and ignored rather than refusing the manifest, so a
+future kind is not a flag day. `TimeoutStopSec=380s` covers the probe budget on
+top of the countdown.
 
 **Only a registered name is dispatchable.** Resolving to *some* executable is
 necessary but not sufficient, or an internal entry point becomes callable from

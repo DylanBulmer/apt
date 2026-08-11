@@ -144,24 +144,48 @@ with a JSON payload on standard input. Every hook registered for an event runs,
 in filename order, even when an earlier one failed: they are independent
 contributions, not a pipeline.
 .SH "[[providers]]"
-One table per artifact kind the plugin can install from.
+One table per capability the plugin offers core, beyond a command and a hook.
 .TP
 .B kind
-.RB ( source )
-The only kind today: something that can populate a staging directory from a
-file the operator names.
+.RB ( source " | " console )
+.B source
+populates a staging directory from a file the operator names.
+.B console
+talks to a server that is already running.
+.IP
+An unrecognised kind is
+.I reported and ignored,
+not refused: the plugin's commands, hooks and understood providers still work.
+A plugin built against a newer core must be able to contribute the parts this
+core understands, or every future kind becomes a flag day for the whole plugin
+set. The report is what keeps
+.B kind = "sauce"
+from being silently inert \(em
+.B mc plugins
+prints it.
 .TP
 .B name
 The provider's name, shown by
 .BR "mc plugins" .
 .TP
 .B extensions
+.RI ( source )
 File extensions claimed, without the dot.
 .B mc install pack.mrpack
 routes to whichever provider claims
 .BR mrpack .
-.PP
-Core invokes it as:
+.TP
+.B priority
+.RI ( console ", integer, default " 0 )
+Which console wins when more than one is installed. Higher is better. The
+shipped consoles sit at 10
+.RB ( mc-rcon )
+and 20
+.RB ( mc-mgmt ),
+so a new one that should take precedence declares a larger number rather than
+renumbering anything.
+.SS "The source protocol"
+Core invokes a source provider as:
 .PP
 .RS
 .nf
@@ -177,6 +201,56 @@ and
 .B java_version
 \(em with everything human-facing on standard error, so core can parse the
 answer without stripping progress lines.
+.SS "The console election"
+Core does not choose a console by name. It asks each one whether it can talk to
+.I this
+server, right now:
+.PP
+.RS
+.nf
+.RI < bin "> console probe"
+.fi
+.RE
+.PP
+.B The answer is the exit status and nothing else.
+Exit 0 means usable. Anything else \(em a non-zero exit, a missing binary, a
+protocol the server's version does not implement, an endpoint that is switched
+off \(em means no, and core tries the next console down. A probe that has not
+exited within
+.B 3 seconds
+is killed, reaped and counted as no. The bound is not decoration: election runs
+on the shutdown path, and a black-holed endpoint must cost a couple of seconds
+rather than the unit's whole
+.BR TimeoutStopSec= .
+.PP
+The elected console is the highest-priority one that answers. It is resolved at
+most once per process and only for the events that need it. A console that
+prints on its probe puts a line in the journal every time the server stops, so
+a console that is simply switched off says nothing.
+.PP
+.B "Only the elected console runs"
+.BR pre-stop ", " pre-backup " and " post-backup .
+Two consoles counting down announce a shutdown that already has a schedule, and
+a second save-on can restore saving halfway through the other's archive. A
+console that lost stands down for those events; a plugin that declares no
+console provider is never suppressed.
+.PP
+.B "Every installed console runs"
+.BR post-install " and " post-upgrade ,
+elected or not, so each keeps its own credentials provisioned. Losing an
+election must not leave a machine with nothing that works the day the winner's
+probe starts failing.
+.PP
+.B mc plugins
+names the outcome:
+.PP
+.RS
+.nf
+console:  mgmt (priority 20) \(em elected
+console:  rcon (priority 10) \(em standing down
+console:  rcon (priority 10) \(em not answering
+.fi
+.RE
 .SH "WHAT MUST NOT MOVE INTO A PLUGIN"
 The lock, the EULA gate, ownership of
 .IR /opt/minecraft ,
@@ -224,5 +298,6 @@ Plugin executables.
 .BR mc (1),
 .BR mc-config (5),
 .BR mc-rcon (1),
+.BR mc-mgmt (1),
 .BR mc-backup (1),
 .BR mc-mrpack (1)

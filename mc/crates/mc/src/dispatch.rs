@@ -73,7 +73,10 @@ fn plugins(ctx: &Ctx) -> Result<()> {
 
     if registry.plugins().is_empty() && registry.problems().is_empty() {
         ui::info("No plugins installed.");
-        ui::info("Available: mc-rcon (console), mc-backup (backups), mc-mrpack (modpacks)");
+        ui::info(
+            "Available: mc-rcon (console), mc-mgmt (console, 1.21.9+), \
+             mc-backup (backups), mc-mrpack (modpacks)",
+        );
         return Ok(());
     }
 
@@ -154,6 +157,7 @@ fn external(ctx: &Ctx, args: Vec<String>) -> Result<()> {
 
     let hint = match name.as_str() {
         "rcon" => "\nInstall it with: apt install mc-rcon",
+        "mgmt" => "\nInstall it with: apt install mc-mgmt",
         "backup" | "restore" => "\nInstall it with: apt install mc-backup",
         _ => "",
     };

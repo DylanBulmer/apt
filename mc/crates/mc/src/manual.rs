@@ -86,6 +86,7 @@ pub fn page_for(registry: &Registry, core: &[&str], topic: Option<&str>) -> Resu
     // somebody is here.
     let hint = match topic {
         "rcon" => "\nInstall it with: apt install mc-rcon",
+        "mgmt" => "\nInstall it with: apt install mc-mgmt",
         "backup" | "restore" => "\nInstall it with: apt install mc-backup",
         "mrpack" => "\nInstall it with: apt install mc-mrpack",
         _ => "\nRun 'mc man' for the manual, or 'mc plugins' for what is installed.",

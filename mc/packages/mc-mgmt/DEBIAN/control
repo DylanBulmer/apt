@@ -1,0 +1,28 @@
+Package: mc-mgmt
+Version: 1.0.0
+Architecture: any
+Maintainer: Dylan Bulmer <dylan@bulmer.dev>
+Depends: mc-server, ${shlibs:Depends}
+Section: admin
+Priority: optional
+Homepage: https://apt.bulmer.dev
+Description: Management protocol console plugin for mc-server
+ Adds the 'mc mgmt' subcommand and the lifecycle hooks that make a shutdown
+ graceful and a backup consistent, speaking the Minecraft Server Management
+ Protocol — JSON-RPC over a WebSocket, served by the game itself from Minecraft
+ 1.21.9 onwards. Older servers do not offer it.
+ .
+ Where the server is new enough this is the better console. Authentication is a
+ bearer token rather than a plaintext password shared with every client, and the
+ interface is a typed API with structured results rather than console command
+ strings whose output has to be scraped, so a player list is a list and a failed
+ call is an error instead of a blank reply.
+ .
+ Installing this alongside mc-rcon is correct and safe. Both register as console
+ providers and mc elects one per server: it prefers this plugin, but only after
+ asking it whether the management endpoint is actually reachable, and falls back
+ to RCON on any server that cannot answer. A mixed fleet of old and new servers
+ needs no per-host configuration.
+ .
+ The plugin declares mc's ABI version in its manifest, so an incompatible pair
+ of packages is refused by name rather than failing at run time.

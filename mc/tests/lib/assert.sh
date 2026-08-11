@@ -87,9 +87,11 @@ install_plugins() {
     dpkg -i "${debs[@]}" >/dev/null 2>&1
 }
 
+# Both consoles, deliberately: mc-rcon and mc-mgmt are designed to coexist and
+# be elected between, so the default fixture is a machine that has both.
 install_all() {
     install_core
-    install_plugins rcon backup mrpack
+    install_plugins rcon mgmt backup mrpack
 }
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

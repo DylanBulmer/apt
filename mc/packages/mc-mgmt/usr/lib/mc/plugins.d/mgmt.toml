@@ -1,0 +1,40 @@
+# mc plugin manifest — see the plugin-development skill for the contract.
+abi  = 1
+name = "mgmt"
+bin  = "/usr/libexec/mc/mc-mgmt"
+
+[[commands]]
+name  = "mgmt"
+about = "Talk to the server over the management protocol"
+
+# Priority 20 outranks mc-rcon's 10, so on a server that offers the management
+# protocol this console wins: a bearer token and a typed API beat a shared
+# plaintext password and scraped command output. Ranking above RCON is only safe
+# because election runs `console probe` first — on anything older than 1.21.9
+# the endpoint is absent, the probe exits non-zero, and core falls through to
+# RCON. The order is a preference, not an assumption about the server.
+[[providers]]
+kind     = "console"
+name     = "mgmt"
+priority = 20
+
+# Warn players and count them down before the server stops. Never fatal: a
+# shutdown must not abort because a warning could not be delivered.
+[[hooks]]
+event = "pre-stop"
+
+# Hold the world still for the duration of an archive.
+[[hooks]]
+event = "pre-backup"
+
+# Turn saving back on. Runs whether or not the backup succeeded.
+[[hooks]]
+event = "post-backup"
+
+# Provision the management endpoint's token and switch it on for a newly
+# installed server.
+[[hooks]]
+event = "post-install"
+
+[[hooks]]
+event = "post-upgrade"

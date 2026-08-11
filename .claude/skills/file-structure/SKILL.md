@@ -6,7 +6,7 @@ description: Map of and exploration guide for the apt.bulmer.dev monorepo — th
 # apt.bulmer.dev structure & exploration
 
 A monorepo with two components: **`mc/`**, a Minecraft server manager shipped as
-four Debian packages, and **`apt/`**, the repository that publishes them. Read
+five Debian packages, and **`apt/`**, the repository that publishes them. Read
 this instead of running `ls -R` or broad greps.
 
 ```
@@ -15,8 +15,10 @@ mc/                          the product
   rust-toolchain.toml        pins rustc for local builds, CI and the container
   clippy.toml                relaxes the no-panic lints for #[cfg(test)] only
   crates/mc-common/          shared library, linked statically by everything
+  crates/mc-console/         console policy, linked by the console plugins only
   crates/mc/                 → /usr/bin/mc                    (mc-server)
   crates/mc-rcon/            → /usr/libexec/mc/mc-rcon, /usr/bin/rcon
+  crates/mc-mgmt/            → /usr/libexec/mc/mc-mgmt
   crates/mc-backup/          → /usr/libexec/mc/mc-backup
   crates/mc-mrpack/          → /usr/libexec/mc/mc-mrpack
   crates/xtask/              build-time only; renders mc.1 from the clap tree
@@ -71,7 +73,20 @@ specific command.
 | `service` | the `ServiceManager` trait, `Systemctl`, `fake::FakeService` |
 | `packages` | the `PackageManager` trait, `Apt`, `fake::FakePackages` |
 | `java` | required version, banner parsing, binary lookup, GC flag presets |
-| `hash`, `version`, `eula`, `chat`, `fsx`, `ui`, `error` | as named |
+| `hash`, `version`, `eula`, `fsx`, `ui`, `error` | as named |
+
+`mc-common`, `mc-console` and `xtask` ship in no package.
+
+**`mc-console`** — what a console does to a running server, independent of how
+it talks to one. Linked by `mc-rcon` and `mc-mgmt` and by nothing else: `mc`,
+`mc-backup` and `mc-mrpack` have no business knowing what a countdown is, which
+is why this is not in `mc-common`.
+
+| Module | Owns |
+|---|---|
+| `lib` | the `Console` trait (`say`, `player_count`, `save_now`, `set_autosave`, `stop`, `wait`) and `answer_probe` for `<bin> console probe` |
+| `countdown` | the announcement schedule and `PlayerCount` — `TimeoutStopSec=` is derived from it |
+| `hooks` | the shared `pre_stop` / `pre_backup` / `post_backup` policy, written once against the trait |
 
 **`mc`** — the dispatcher and everything core does itself.
 
@@ -88,8 +103,11 @@ specific command.
 | `manual` | `mc man` — which page answers a topic, and the handoff to man(1) |
 | `sources/{vanilla,paper,fabric,neoforge}` | one upstream each, behind the `Source` trait |
 
-**Plugins** — `mc-rcon` (`protocol`, `session`, `password`, `players`,
-`countdown`), `mc-backup` (`archive`, `rotation`), `mc-mrpack` (`manifest`).
+**Plugins** — `mc-rcon` (`protocol`, `session`, `password`, `players`, `chat`),
+`mc-mgmt` (`endpoint`, `rpc`, `transport`, `methods`), `mc-backup` (`archive`,
+`rotation`), `mc-mrpack` (`manifest`). The first two are consoles and implement
+`mc_console::Console`; `chat` builds a `tellraw` and lives in `mc-rcon` because
+only RCON needs one.
 
 ## The privilege boundary
 
@@ -169,7 +187,9 @@ mc/crates/` is a readable index of what this code promises.
 | New capability, new command, or a new hook consumer | **a new plugin package** — see `plugin-development` |
 | New hook event | `plugin::Event` + the dispatch site + the `plugin-development` table |
 | Launch/JVM/GC behaviour | `mc/crates/mc/src/commands/serve.rs`, `java::default_flags` |
-| Shutdown behaviour | `mc-rcon`'s `pre-stop` hook (recompute `TimeoutStopSec` if timings move) |
+| Shutdown behaviour, or anything a console does the same way over any transport | `mc/crates/mc-console/src/hooks.rs` and `countdown.rs` — both consoles inherit it (recompute `TimeoutStopSec` if timings move) |
+| How one console talks — a method, a frame, a credential | that plugin's own crate: `mc-rcon/src/{protocol,session}.rs`, `mc-mgmt/src/{rpc,transport,methods,endpoint}.rs` |
+| A new console for some other protocol | a new plugin declaring `kind = "console"` with a `priority`, implementing `Console` and answering `console probe` |
 | Install-time ownership | `mc/packages/mc-server/DEBIAN/postinst` |
 | New setting for how mc runs the server | `mc-common/src/config.rs` + `mc/packages/mc-server/etc/minecraft/config.toml` |
 | New setting for what the game does | `server.properties` — never mirrored into config.toml |
@@ -196,5 +216,5 @@ regenerates its trees per run, so **any change without a version bump is
 published under the old version and never reaches installed systems.** Bump with
 the change, not after.
 
-All four packages are architecture-specific now: each ships compiled binaries,
-so every architecture leg builds all four.
+All five packages are architecture-specific: each ships compiled binaries, so
+every architecture leg builds all five.

@@ -45,9 +45,14 @@ event = "pre-stop"
 # fatal = true                        # opt-in; refused for pre-stop/post-backup
 
 [[providers]]
-kind       = "source"                 # only kind today
+kind       = "source"                 # populates a staging dir from a file
 name       = "mrpack"
 extensions = ["mrpack"]               # `mc install pack.mrpack` routes here
+
+[[providers]]
+kind     = "console"                  # talks to a running server
+name     = "mgmt"
+priority = 20                         # higher wins the election; rcon is 10
 ```
 
 Discovery is **sorted by filename**, so two plugins on the same event fire in
@@ -56,8 +61,13 @@ that do not care.
 
 A manifest is refused — with the plugin named, and without disturbing any other
 — when: the `abi` is not core's, an event name is unknown, `bin` is not an
-executable file, a provider `kind` is unknown, or a non-fatal-only event is
-marked `fatal`. `mc plugins` reports every refusal.
+executable file, or a non-fatal-only event is marked `fatal`. `mc plugins`
+reports every refusal.
+
+An unknown provider `kind` is the exception: it is **reported and ignored**, and
+the plugin's commands, hooks and understood providers keep working. A plugin
+built against a newer core must still contribute the parts this core
+understands, or every future kind is a flag day for the whole plugin set.
 
 ## Invocation contract
 
@@ -66,6 +76,7 @@ marked `fatal`. `mc plugins` reports every refusal.
 | Subcommand | `<bin> command <name> [args…]` | `exec`, so the plugin owns the terminal |
 | Hook | `<bin> hook <event>` | JSON payload on **stdin** |
 | Source provider | `<bin> provide <file> <staging-dir>` | JSON report on **stdout** |
+| Console provider | `<bin> console probe` | **exit status only** — 0 means usable |
 
 Environment on every invocation: `MC_ABI`, `MC_ROOT`, `MC_BASE`, `MC_CONFIG`,
 `MC_USER`. Read paths with `Paths::from_env()` — never hardcode them, or the
@@ -102,6 +113,40 @@ refuses to let a plugin claim otherwise:
 Every registered plugin runs even when an earlier one failed: hooks are
 independent contributions, not a pipeline.
 
+## The console election
+
+A **console** is a plugin that can talk to a server that is already running.
+`mc-rcon` speaks RCON, which every version has; `mc-mgmt` speaks the management
+protocol, which exists from 1.21.9. Both are installed on the same machine and
+neither is named anywhere in core.
+
+Core elects the highest-`priority` console whose `<bin> console probe` exits 0
+within **3 seconds**. Anything else — a non-zero exit, a missing binary, a
+protocol this server's version does not implement, an endpoint that is switched
+off, a hang — is "no", and the next one down takes over. The bound matters:
+election runs on the shutdown path, and a black-holed endpoint must cost a
+couple of seconds rather than the unit's whole `TimeoutStopSec`.
+
+**The answer is the exit status and nothing else.** Use
+`mc_console::answer_probe(verb, || …)`, which prints nothing: a console that is
+merely switched off would otherwise put a line in the journal every time the
+server stops.
+
+| Event | Who runs it |
+|---|---|
+| `pre-stop`, `pre-backup`, `post-backup` | **the elected console only** — two countdowns are worse than one, and a second save-on can restore saving mid-archive |
+| `post-install`, `post-upgrade` | **every installed console** — each keeps its own credentials provisioned, so losing an election never leaves a machine with nothing that works |
+
+A plugin that declares no console provider is never suppressed. `mc plugins`
+prints `console: <name> (priority N) — elected | standing down | not answering`.
+
+A new console implements `mc_console::Console` — `say`, `player_count`,
+`save_now`, `set_autosave`, `stop`, `wait` — and hands it to
+`mc_console::hooks::{pre_stop, pre_backup, post_backup}`. The transport is the
+only thing a console writes for itself; the policy is shared so it cannot drift
+between them. Pick a `priority` above the console you should beat (10 for RCON,
+20 for the management protocol) rather than renumbering anything.
+
 ## What must stay in core
 
 A plugin contributes a **step**. Core keeps the ordering that makes the step
@@ -131,7 +176,7 @@ no runtime coupling to core's build.
 | A temp tree | `staging::Staging` (RAII) | `mktemp` + cleanup |
 | Download URL from untrusted input | `http::host_allowed` | substring search |
 | Verify an artifact | `hash::verify_file` | skipping when no hash is published |
-| Broadcast to players | `chat::say` (builds a `tellraw`) | `say` — renders as `[Rcon] …` |
+| Anything a console does to a running server | implement `mc_console::Console` and let `mc_console::hooks` drive it — including the broadcast | your own countdown, or a second `say` policy |
 | Privilege | `privilege::{require_root, require_root_or_group}` | `getuid() == 0` |
 | Version from untrusted input | `version::validate` | interpolating it into a URL |
 | Output | `ui::{info, warn, error}` | `println!` (stdout is for data) |
@@ -143,7 +188,7 @@ take `require_root_or_group`, anything that writes takes `require_root`.
 ## Adding a plugin: the checklist
 
 1. **`mc/crates/mc-<name>/`** — a `[[bin]]` named `mc-<name>`, `mc-common` as a
-   dependency, `[lints] workspace = true`.
+   dependency (`mc-console` too if it is a console), `[lints] workspace = true`.
 2. **`mc/packages/mc-<name>/`** — mirrors the target root:
    `DEBIAN/control` (`Depends: mc-server, ${shlibs:Depends}`),
    `usr/lib/mc/plugins.d/<name>.toml`, any units.

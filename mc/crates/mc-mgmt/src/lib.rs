@@ -13,7 +13,9 @@
 //! count arrives as an array rather than as a sentence that every fork words
 //! differently, and there is no command string for a name to be injected into.
 
+pub mod console;
 pub mod endpoint;
 pub mod methods;
+pub mod provision;
 pub mod rpc;
 pub mod transport;

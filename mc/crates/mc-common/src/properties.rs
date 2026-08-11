@@ -21,7 +21,23 @@ use crate::paths::{MC_USER, Paths, STOCK_PORT};
 pub const MODE: u32 = 0o640;
 
 /// Keys the system owns. A pack override never gets to set these.
-pub const MANAGED_KEYS: [&str; 4] = ["server-port", "enable-rcon", "rcon.port", "rcon.password"];
+///
+/// Both consoles' credentials are here for the same reason: a `.mrpack` is
+/// attacker-controlled input merged into this file as root, and a pack that
+/// could choose `rcon.password` or `management-server-secret` would be a pack
+/// that hands itself a console on the operator's server. The management keys
+/// carry no defaults of their own — see [`managed_value`] — so a pack's values
+/// are discarded and whatever `mc mgmt enable` provisioned is restored.
+pub const MANAGED_KEYS: [&str; 8] = [
+    "server-port",
+    "enable-rcon",
+    "rcon.port",
+    "rcon.password",
+    "management-server-enabled",
+    "management-server-host",
+    "management-server-port",
+    "management-server-secret",
+];
 
 /// One physical line. Comments, blanks and anything unparseable are carried
 /// through verbatim: the JVM writes a dated comment header and operators edit
@@ -412,6 +428,70 @@ mod tests {
         assert_eq!(live.get("server-port"), Some("25565"));
         // Everything the pack is *allowed* to set still lands.
         assert_eq!(live.get("motd"), Some("Modpack"));
+    }
+
+    #[test]
+    fn a_pack_cannot_choose_the_management_secret() {
+        // The same attack as the RCON one, against the newer console: a pack
+        // that could set `management-server-secret` would hand itself a
+        // console on the operator's server, and one that could move the host
+        // off loopback would publish it.
+        let (_dir, paths) = sandbox();
+        init(&paths).unwrap();
+
+        // What `mc mgmt enable` provisioned.
+        let mut live = Properties::load(&paths.server_properties());
+        live.set("management-server-enabled", "true");
+        live.set("management-server-host", "localhost");
+        live.set("management-server-port", "25585");
+        live.set("management-server-secret", "the-real-secret");
+        live.save(&paths.server_properties()).unwrap();
+
+        merge(
+            &paths,
+            "motd=Modpack\n\
+             management-server-enabled=true\n\
+             management-server-host=0.0.0.0\n\
+             management-server-port=31337\n\
+             management-server-secret=attacker-chosen\n",
+        )
+        .unwrap();
+
+        let live = Properties::load(&paths.server_properties());
+        assert_eq!(
+            live.get("management-server-secret"),
+            Some("the-real-secret")
+        );
+        assert_eq!(live.get("management-server-host"), Some("localhost"));
+        assert_eq!(live.get("management-server-port"), Some("25585"));
+        assert_eq!(live.get("motd"), Some("Modpack"));
+    }
+
+    #[test]
+    fn a_pack_cannot_switch_the_management_protocol_on_by_itself() {
+        // With nothing provisioned there is no secret to preserve, so the
+        // danger is the opposite one: a pack turning the endpoint ON, which
+        // would leave it listening with whatever secret the pack chose.
+        let (_dir, paths) = sandbox();
+        init(&paths).unwrap();
+
+        merge(
+            &paths,
+            "management-server-enabled=true\nmanagement-server-secret=attacker-chosen\n",
+        )
+        .unwrap();
+
+        let live = Properties::load(&paths.server_properties());
+        assert_ne!(
+            live.get("management-server-secret"),
+            Some("attacker-chosen"),
+            "a pack's secret must never survive a merge"
+        );
+        assert_ne!(
+            live.get("management-server-enabled"),
+            Some("true"),
+            "a pack must not switch the endpoint on"
+        );
     }
 
     #[test]

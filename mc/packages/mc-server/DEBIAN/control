@@ -3,7 +3,7 @@ Version: 1.0.0
 Architecture: any
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
 Depends: ${shlibs:Depends}
-Recommends: mc-rcon, mc-backup, mc-mrpack
+Recommends: mc-rcon, mc-mgmt, mc-backup, mc-mrpack
 Suggests: man-db
 Section: admin
 Priority: optional
@@ -19,9 +19,13 @@ Description: Minecraft server lifecycle manager
  .
  mc is plugin-first: a plugin is another .deb that drops a manifest into
  /usr/lib/mc/plugins.d/ and contributes subcommands and lifecycle hooks. The
- recommended set is mc-rcon (console, graceful shutdown), mc-backup (backups and
- restores) and mc-mrpack (Modrinth modpacks). Run 'mc plugins' to see what is
- installed.
+ recommended set is mc-rcon and mc-mgmt (consoles, graceful shutdown), mc-backup
+ (backups and restores) and mc-mrpack (Modrinth modpacks). Run 'mc plugins' to
+ see what is installed.
+ .
+ Both consoles are recommended because mc elects between them per server: it
+ prefers mc-mgmt's management protocol where the server offers it and falls back
+ to mc-rcon everywhere else, so a stock install works against any version.
  .
  Installing a server requires accepting the Minecraft EULA, either interactively
  or with 'mc install --accept-eula'. The server will not start until it has been.
