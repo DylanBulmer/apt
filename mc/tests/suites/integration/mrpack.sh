@@ -45,7 +45,7 @@ rcon.port=31337
 server-port=1234
 '
 check_true 'mc install accepts the pack' \
-    mc install /tmp/fixture.mrpack --accept-eula --yes
+    mc install -f /tmp/fixture.mrpack --accept-eula --yes
 
 check_true  'a server artifact landed'   test -s /opt/minecraft/server.jar
 check_true  'the override tree merged'   test -f /opt/minecraft/config/pack.cfg
@@ -92,6 +92,6 @@ check_output 'refusal names .mrpack' '.mrpack' mc upgrade --version 1.21.3
 section 'Removing the provider withdraws the capability'
 dpkg -r mc-mrpack >/dev/null 2>&1
 check_output 'a pack now names its package' 'apt install mc-mrpack' \
-    mc install /tmp/fixture.mrpack --accept-eula --force
+    mc install -f /tmp/fixture.mrpack --accept-eula --force
 
 report

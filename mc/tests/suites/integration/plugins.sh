@@ -20,7 +20,7 @@ section 'A command core does not implement points at the package that adds it'
 check_output 'mc rcon suggests mc-rcon'      'apt install mc-rcon'    mc rcon
 check_output 'mc backup suggests mc-backup'  'apt install mc-backup'  mc backup
 check_output 'a .mrpack suggests mc-mrpack'  'apt install mc-mrpack'  \
-    mc install /tmp/nonexistent.mrpack --accept-eula
+    mc install -f /tmp/nonexistent.mrpack --accept-eula
 
 section 'Upgrade refuses without a backup provider'
 # The shell version could assume a backup was always available because it lived
