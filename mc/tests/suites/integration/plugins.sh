@@ -92,7 +92,10 @@ section 'Removing one console leaves the other and leaves core working'
 dpkg -r mc-mgmt >/dev/null 2>&1
 check_false 'the mgmt manifest is gone' test -f /usr/lib/mc/plugins.d/mgmt.toml
 check_false 'the mgmt binary is gone'   test -f /usr/libexec/mc/mc-mgmt
+# Not just refused — refused with the package to install. A command an operator
+# knows exists and that has silently vanished is the case this hint is for.
 check_output 'mc mgmt is no longer dispatchable' 'Unknown command' mc mgmt
+check_output 'and the refusal names the package' 'apt install mc-mgmt' mc mgmt
 check_output "rcon's console line survives" 'console:  rcon (priority 10)' mc plugins
 check_true   'core still works'          mc --version
 

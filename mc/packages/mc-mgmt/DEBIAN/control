@@ -2,7 +2,7 @@ Package: mc-mgmt
 Version: 1.0.0
 Architecture: any
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
-Depends: mc-server, ${shlibs:Depends}
+Depends: mc-server (>= 1.0.0), ${shlibs:Depends}
 Section: admin
 Priority: optional
 Homepage: https://apt.bulmer.dev
