@@ -25,6 +25,15 @@ fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths = Paths::from_env();
 
+    // Completions list: outputs JSON for mc completions to consume
+    if args.first().map(String::as_str) == Some("completions")
+        && args.get(1).map(String::as_str) == Some("list")
+    {
+        // mrpack has no user-facing commands (it's a source provider)
+        println!(r#"{{"subcommands":[]}}"#);
+        return std::process::ExitCode::SUCCESS;
+    }
+
     let result = match args.first().map(String::as_str) {
         Some("provide") => provide(&paths, &args),
         Some("hook") => Ok(()),

@@ -26,6 +26,16 @@ fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths = Paths::from_env();
 
+    // Completions list: outputs JSON for mc completions to consume
+    if args.first().map(String::as_str) == Some("completions")
+        && args.get(1).map(String::as_str) == Some("list")
+    {
+        println!(
+            r#"{{"subcommands":[{{"name":"enable","about":"Enable RCON (writes server.properties)"}},{{"name":"disable","about":"Disable RCON (writes server.properties)"}},{{"name":"status","about":"Show RCON configuration"}}]}}"#
+        );
+        return std::process::ExitCode::SUCCESS;
+    }
+
     // Answered with an exit status and nothing else. Core probes every console
     // on the shutdown path, and a server that simply has RCON switched off is
     // not a fault worth a line in the journal every time it stops.
@@ -69,6 +79,20 @@ fn command(paths: &Paths, args: &[String]) -> Result<()> {
     // args[0] is the subcommand name core dispatched on.
     let rest = args.get(1..).unwrap_or_default();
 
+    if rest.first().map(String::as_str) == Some("--help")
+        || rest.first().map(String::as_str) == Some("-h")
+    {
+        println!("{}", usage());
+        return Ok(());
+    }
+
+    if rest.first().map(String::as_str) == Some("--version")
+        || rest.first().map(String::as_str) == Some("-V")
+    {
+        println!("mc-rcon {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     match rest.first().map(String::as_str) {
         // State verbs act on server.properties rather than talking to a running
         // server, so they are handled before any connection is attempted — you
@@ -95,6 +119,16 @@ fn command(paths: &Paths, args: &[String]) -> Result<()> {
             interactive_or_once(paths, args, &command_words)
         }
     }
+}
+
+fn usage() -> &'static str {
+    "Usage: mc rcon [enable|disable|status]\n   \
+     mc rcon [server-command]\n   \
+     mc rcon -- [server-command]\n\n \
+     enable    Enable RCON (writes server.properties)\n   \
+     disable   Disable RCON (writes server.properties)\n   \
+     status    Show RCON configuration\n   \
+     <command> Execute a single RCON command, or enter interactive mode"
 }
 
 fn verb(

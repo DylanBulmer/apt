@@ -187,23 +187,197 @@ fn completions(shell: clap_complete::Shell) -> Result<()> {
     let mut command = Cli::command();
     let paths = Paths::from_env();
     let registry = Registry::discover(&paths);
-    // Owned names: `registry.commands()` borrows from the registry, and
-    // clap_complete requires `'static` strings, so we collect first.
-    let commands: Vec<(&'static str, &'static str)> = registry
-        .plugins()
-        .iter()
-        .flat_map(|p| p.commands.iter())
-        .map(|c| {
-            let name = Box::leak(c.name.clone().into_boxed_str());
-            let about = Box::leak(c.about.clone().into_boxed_str());
-            (name as &'static str, about as &'static str)
-        })
-        .collect();
-    for (name, about) in commands {
-        command = command.subcommand(clap::Command::new(name).about(about));
+
+    for plugin in registry.plugins() {
+        for cmd_decl in &plugin.commands {
+            // Ask the plugin for its subcommands via `completions list`.
+            // Falls back to no subcommands if the plugin doesn't support it.
+            let subcommands = plugin_subcommands(plugin);
+
+            let mut subcmd = clap::Command::new(
+                Box::leak(cmd_decl.name.clone().into_boxed_str()) as &'static str
+            )
+            .about(Box::leak(cmd_decl.about.clone().into_boxed_str()) as &'static str);
+
+            for sc in subcommands {
+                subcmd = subcmd.subcommand(clap::Command::new(sc.name).about(sc.about));
+            }
+
+            command = command.subcommand(subcmd);
+        }
     }
-    clap_complete::generate(shell, &mut command, "mc", &mut std::io::stdout());
+
+    // Generate to a buffer first so we can post-process.
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut command, "mc", &mut buf);
+    let script = String::from_utf8(buf).map_err(|e| Error::other(e.to_string()))?;
+
+    // Post-process for bash: only show subcommands unless a dash is typed,
+    // and hide short flags to reduce noise.
+    let output = match shell {
+        clap_complete::Shell::Bash => postprocess_bash(&script),
+        _ => script,
+    };
+
+    print!("{output}");
     Ok(())
+}
+
+/// Post-process a bash completion script to improve usability:
+/// - Only show subcommands when no dash is typed
+/// - Only show long flags when a dash is typed (short flags hidden)
+fn postprocess_bash(script: &str) -> String {
+    // First pass: split opts= lines into flags= and cmds= variables.
+    let mut result = String::with_capacity(script.len());
+
+    for line in script.lines() {
+        if let Some(opts_match) = extract_opts(line) {
+            let (flags, cmds) = split_opts(&opts_match);
+            let indent = line.find('o').unwrap_or(0);
+            let prefix = &line[..indent];
+            result.push_str(&format!(
+                "{}opts=\"{}\"\n{}flags=\"{}\"\n{}cmds=\"{}\"",
+                prefix, opts_match, prefix, flags, prefix, cmds
+            ));
+            result.push('\n');
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    // Second pass: replace the completion logic line-by-line.
+    // Match: if [[ ${cur} == -* || ${COMP_CWORD} -eq N ]] ; then
+    let lines: Vec<&str> = result.lines().collect();
+    let mut output = String::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines.get(i).copied().unwrap_or("");
+        if line.contains("${cur} == -* || ${COMP_CWORD} -eq ") {
+            let indent = line.find("if").unwrap_or(0);
+            let prefix = &line[..indent];
+            let cword = extract_comp_cword(line);
+            output.push_str(prefix);
+            output.push_str("if [[ ${cur} == --* ]]; then\n");
+            output.push_str(prefix);
+            output.push_str("    COMPREPLY=( $(compgen -W \"${flags}\" -- \"${cur}\") )\n");
+            output.push_str(prefix);
+            output.push_str("    return 0\n");
+            output.push_str(prefix);
+            output.push_str("elif [[ ${COMP_CWORD} -eq ");
+            output.push_str(&cword.to_string());
+            output.push_str(" ]]; then\n");
+            output.push_str(prefix);
+            output.push_str("    COMPREPLY=( $(compgen -W \"${cmds}\" -- \"${cur}\") )\n");
+            output.push_str(prefix);
+            output.push_str("    return 0\n");
+            // Skip the next 2 lines (COMPREPLY and return 0)
+            i += 3;
+            // The fi line follows
+            if lines.get(i).is_some_and(|l| l.trim() == "fi") {
+                output.push_str(&format!("{}fi\n", prefix));
+                i += 1;
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+            i += 1;
+        }
+    }
+
+    output
+}
+
+/// Extract the COMP_CWORD value from a line like "if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then".
+fn extract_comp_cword(line: &str) -> u8 {
+    for (cword, pattern) in [
+        (1, "-eq 1"),
+        (2, "-eq 2"),
+        (3, "-eq 3"),
+        (4, "-eq 4"),
+        (5, "-eq 5"),
+    ] {
+        if line.contains(pattern) {
+            return cword;
+        }
+    }
+    1
+}
+
+/// Extract the value from an opts= line.
+fn extract_opts(line: &str) -> Option<String> {
+    let opts_start = line.find("opts=\"")?;
+    let value_start = opts_start + 6;
+    let value_end = line.rfind('"')?;
+    if value_end > value_start {
+        Some(line[value_start..value_end].to_string())
+    } else {
+        None
+    }
+}
+
+/// Split opts into flags (starting with -) and commands (not starting with -).
+fn split_opts(opts: &str) -> (String, String) {
+    let mut flags = Vec::new();
+    let mut cmds = Vec::new();
+
+    for word in opts.split_whitespace() {
+        if word.starts_with('-') {
+            flags.push(word);
+        } else {
+            cmds.push(word);
+        }
+    }
+
+    (flags.join(" "), cmds.join(" "))
+}
+
+/// Query a plugin binary for its subcommands.
+///
+/// Runs `<bin> completions list` and parses the JSON output. Silently
+/// returns an empty list if the plugin doesn't support the command —
+/// older plugins ship without it.
+struct Subcommand {
+    name: &'static str,
+    about: &'static str,
+}
+
+fn plugin_subcommands(plugin: &mc_common::plugin::Manifest) -> Vec<Subcommand> {
+    let Ok(output) = std::process::Command::new(&plugin.bin)
+        .args(["completions", "list"])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return Vec::new();
+    };
+
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stdout) else {
+        return Vec::new();
+    };
+
+    parsed
+        .get("subcommands")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|obj| {
+                    let name = obj.get("name")?.as_str()?;
+                    let about = obj.get("about")?.as_str()?;
+                    Some(Subcommand {
+                        name: Box::leak(name.to_owned().into_boxed_str()) as &'static str,
+                        about: Box::leak(about.to_owned().into_boxed_str()) as &'static str,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -216,18 +390,20 @@ mod completions_tests {
         let mut command = Cli::command();
         let paths = Paths::from_env();
         let registry = Registry::discover(&paths);
-        let commands: Vec<(&'static str, &'static str)> = registry
-            .plugins()
-            .iter()
-            .flat_map(|p| p.commands.iter())
-            .map(|c| {
-                let name = Box::leak(c.name.clone().into_boxed_str());
-                let about = Box::leak(c.about.clone().into_boxed_str());
-                (name as &'static str, about as &'static str)
-            })
-            .collect();
-        for (name, about) in commands {
-            command = command.subcommand(clap::Command::new(name).about(about));
+
+        for plugin in registry.plugins() {
+            for cmd_decl in &plugin.commands {
+                let mut subcmd = clap::Command::new(Box::leak(
+                    cmd_decl.name.clone().into_boxed_str(),
+                ) as &'static str)
+                .about(Box::leak(cmd_decl.about.clone().into_boxed_str()) as &'static str);
+
+                for sc in plugin_subcommands(plugin) {
+                    subcmd = subcmd.subcommand(clap::Command::new(sc.name).about(sc.about));
+                }
+
+                command = command.subcommand(subcmd);
+            }
         }
 
         let mut buf = Vec::new();

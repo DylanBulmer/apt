@@ -80,6 +80,7 @@ pub enum Command {
     },
 
     /// Print a shell completion script
+    #[command(hide = true)]
     Completions {
         #[arg(value_enum)]
         shell: clap_complete::Shell,

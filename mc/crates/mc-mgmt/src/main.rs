@@ -24,6 +24,16 @@ fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths = Paths::from_env();
 
+    // Completions list: outputs JSON for mc completions to consume
+    if args.first().map(String::as_str) == Some("completions")
+        && args.get(1).map(String::as_str) == Some("list")
+    {
+        println!(
+            r#"{{"subcommands":[{{"name":"status","about":"Show management protocol configuration"}},{{"name":"players","about":"List connected players"}},{{"name":"say","about":"Broadcast a message to all players"}},{{"name":"enable","about":"Enable the management protocol"}},{{"name":"disable","about":"Disable the management protocol"}},{{"name":"allowlist","about":"Manage the allowlist"}},{{"name":"bans","about":"Manage the ban list"}},{{"name":"ip-bans","about":"Manage the IP ban list"}},{{"name":"operators","about":"Manage the operator list"}}]}}"#
+        );
+        return std::process::ExitCode::SUCCESS;
+    }
+
     // Answered with an exit status and nothing else — core probes every
     // console on the shutdown path, and a server too old for this protocol is
     // not a fault worth a line in the journal each time it stops.
@@ -122,6 +132,20 @@ fn command(paths: &Paths, args: &[String]) -> Result<()> {
     // args[0] is the subcommand name core dispatched on.
     let rest = args.get(1..).unwrap_or_default();
 
+    if rest.first().map(String::as_str) == Some("--help")
+        || rest.first().map(String::as_str) == Some("-h")
+    {
+        println!("{}", usage());
+        return Ok(());
+    }
+
+    if rest.first().map(String::as_str) == Some("--version")
+        || rest.first().map(String::as_str) == Some("-V")
+    {
+        println!("mc-mgmt {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     match rest.first().map(String::as_str) {
         // State verbs act on server.properties rather than on a running
         // server: you must be able to enable the protocol on a server that is
@@ -145,15 +169,24 @@ fn command(paths: &Paths, args: &[String]) -> Result<()> {
 
         None => Err(Error::config(usage())),
         Some(other) => Err(Error::config(format!(
-            "Unknown: mc mgmt {other}\n{}",
+            "Unknown subcommand: mc mgmt {other}\n{}",
             usage()
         ))),
     }
 }
 
 fn usage() -> String {
-    "Usage: mc mgmt <status|players|say|enable|disable>\n       \
-     mc mgmt <allowlist|bans|ip-bans|operators> [add|remove <name>]"
+    "Usage: mc mgmt <COMMAND>\n\n \
+     Commands:\n   \
+     status    Show management protocol configuration\n   \
+     players   List connected players\n   \
+     say <msg> Broadcast a message to all players\n   \
+     enable    Enable the management protocol\n   \
+     disable   Disable the management protocol\n   \
+     allowlist [add|remove <name>]  Manage the allowlist\n   \
+     bans      [add|remove <name>]  Manage the ban list\n   \
+     ip-bans   [add|remove <addr>]  Manage the IP ban list\n   \
+     operators [add|remove <name>]  Manage the operator list"
         .to_string()
 }
 

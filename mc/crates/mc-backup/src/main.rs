@@ -14,6 +14,39 @@ fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths = Paths::from_env();
 
+    // Completions list: outputs JSON for mc completions to consume
+    if args.first().map(String::as_str) == Some("completions")
+        && args.get(1).map(String::as_str) == Some("list")
+    {
+        // backup and restore have no subcommands
+        println!(r#"{{"subcommands":[]}}"#);
+        return std::process::ExitCode::SUCCESS;
+    }
+
+    // Handle --help and --version before any other checks
+    if args.get(2).map(String::as_str) == Some("--help")
+        || args.get(2).map(String::as_str) == Some("-h")
+    {
+        match args.get(1).map(String::as_str) {
+            Some("backup") => {
+                println!("{}", backup_usage());
+                return std::process::ExitCode::SUCCESS;
+            }
+            Some("restore") => {
+                println!("{}", restore_usage());
+                return std::process::ExitCode::SUCCESS;
+            }
+            _ => {}
+        }
+    }
+
+    if args.get(2).map(String::as_str) == Some("--version")
+        || args.get(2).map(String::as_str) == Some("-V")
+    {
+        println!("mc-backup {}", env!("CARGO_PKG_VERSION"));
+        return std::process::ExitCode::SUCCESS;
+    }
+
     let result = match (
         args.first().map(String::as_str),
         args.get(1).map(String::as_str),
@@ -284,4 +317,17 @@ fn chown_tree(base: &Path) -> Result<()> {
         Ok(())
     }
     walk(base, owner)
+}
+
+fn backup_usage() -> &'static str {
+    "Usage: mc backup\n\n \
+     Create a backup of the Minecraft server.\n \
+     The backup is stored in /opt/minecraft/backups/.\n \
+     Old backups are rotated according to the keep count in config.toml."
+}
+
+fn restore_usage() -> &'static str {
+    "Usage: mc restore <backup-file>\n\n \
+     Restore the Minecraft server from a backup archive.\n \
+     The server will be stopped during restoration."
 }
