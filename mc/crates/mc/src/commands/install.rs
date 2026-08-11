@@ -119,8 +119,6 @@ pub fn upgrade(ctx: &Ctx, args: UpgradeArgs) -> Result<()> {
     let mut cfg = Config::load(&ctx.paths)?;
     crate::commands::lifecycle::require_server(ctx)?;
 
-    let _lock = mc_common::lock::acquire(&ctx.paths.lock_file())?;
-
     // A no-op on any server installed through mc, which already accepted. It
     // matters for one case: a server whose eula.txt was never written or was
     // set back to false. `mc serve` refuses to launch that, so upgrading
@@ -169,11 +167,17 @@ pub fn upgrade(ctx: &Ctx, args: UpgradeArgs) -> Result<()> {
         }
     }
 
+    // The backup runs as a separate process (`mc-backup command backup`) which
+    // acquires its own lock. Holding our lock here would collide with it
+    // because the re-entrancy guard only covers the same PID. Run the backup
+    // without holding the lock, then re-acquire for the file mutations below.
     if args.no_backup {
         ui::warn("Skipping the pre-upgrade backup (--no-backup).");
     } else {
         take_backup(ctx)?;
     }
+
+    let _lock = mc_common::lock::acquire(&ctx.paths.lock_file())?;
 
     let was_running = ctx.service.is_active(SERVICE_UNIT);
     if was_running {
