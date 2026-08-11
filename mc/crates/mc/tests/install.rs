@@ -421,7 +421,11 @@ fn upgrade_preserves_user_generated_content() {
     std::fs::create_dir_all(sandbox.paths.base().join("world")).unwrap();
     std::fs::create_dir_all(sandbox.paths.base().join("playerdata")).unwrap();
     std::fs::write(sandbox.paths.base().join("world/level.dat"), b"world-data").unwrap();
-    std::fs::write(sandbox.paths.base().join("playerdata/uuid.dat"), b"player-data").unwrap();
+    std::fs::write(
+        sandbox.paths.base().join("playerdata/uuid.dat"),
+        b"player-data",
+    )
+    .unwrap();
     std::fs::write(sandbox.paths.base().join("whitelist.json"), b"[\"player\"]").unwrap();
     std::fs::write(sandbox.paths.base().join("ops.json"), b"[]").unwrap();
     sandbox.write_config("[server]\ntype = \"vanilla\"\nversion = \"1.21.3\"\n");
@@ -466,7 +470,10 @@ fn upgrade_with_bad_hash_leaves_server_intact() {
     let err = install::upgrade(&ctx, upgrade_args()).unwrap_err();
     assert!(matches!(err, Error::Rejected(_)), "{err}");
     // Existing server untouched.
-    assert_eq!(std::fs::read(sandbox.paths.server_jar()).unwrap(), b"existing");
+    assert_eq!(
+        std::fs::read(sandbox.paths.server_jar()).unwrap(),
+        b"existing"
+    );
     // Version not repinned.
     assert!(
         sandbox.read_config().contains("1.21.3"),
@@ -561,7 +568,10 @@ fn install_without_accept_eula_proceeds() {
     args.accept_eula = false;
     install::install(&ctx, args).unwrap();
 
-    assert!(sandbox.paths.server_jar().exists(), "server.jar should be installed");
+    assert!(
+        sandbox.paths.server_jar().exists(),
+        "server.jar should be installed"
+    );
     assert!(
         !mc_common::eula::accepted(&sandbox.paths.eula()),
         "eula.txt should NOT be auto-populated"

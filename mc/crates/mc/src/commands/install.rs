@@ -157,7 +157,8 @@ pub fn upgrade(ctx: &Ctx, args: UpgradeArgs) -> Result<()> {
     if args.pack.is_none() && !args.force && target_type.version_identifies_artifact() {
         let source = sources::for_type(target_type);
         if let Some(resolved) = source.resolve(ctx.http.as_ref(), &target)
-            && resolved == cfg.server.version && target_type == cfg.server.server_type
+            && resolved == cfg.server.version
+            && target_type == cfg.server.server_type
         {
             ui::info(format!(
                 "Already running {} {resolved} — nothing to upgrade.",

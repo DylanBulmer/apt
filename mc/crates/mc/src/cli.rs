@@ -311,9 +311,8 @@ mod tests {
 
     #[test]
     fn install_all_short_hands_together() {
-        let cli = Cli::try_parse_from([
-            "mc", "install", "-t", "fabric", "-v", "1.21", "-y", "-F",
-        ]).unwrap();
+        let cli = Cli::try_parse_from(["mc", "install", "-t", "fabric", "-v", "1.21", "-y", "-F"])
+            .unwrap();
         match cli.command {
             Command::Install(args) => {
                 assert_eq!(args.server_type, Some(ServerType::Fabric));
@@ -383,7 +382,8 @@ mod tests {
     fn upgrade_all_short_hands_together() {
         let cli = Cli::try_parse_from([
             "mc", "upgrade", "-t", "vanilla", "-v", "1.21.9", "-y", "-F", "-n",
-        ]).unwrap();
+        ])
+        .unwrap();
         match cli.command {
             Command::Upgrade(args) => {
                 assert_eq!(args.server_type, Some(ServerType::Vanilla));
