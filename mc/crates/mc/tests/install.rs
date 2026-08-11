@@ -27,6 +27,7 @@ fn install_args() -> InstallArgs {
 
 fn upgrade_args() -> UpgradeArgs {
     UpgradeArgs {
+        server_type: None,
         version: None,
         pack: None,
         assume_yes: true,

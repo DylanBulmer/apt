@@ -94,15 +94,15 @@ pub enum Command {
 #[derive(Debug, clap::Args)]
 pub struct InstallArgs {
     /// Server type: vanilla, paper, fabric or neoforge
-    #[arg(long = "type", value_name = "TYPE")]
+    #[arg(long = "type", short = 't', value_name = "TYPE")]
     pub server_type: Option<ServerType>,
 
     /// Minecraft version, or "latest"
-    #[arg(long, value_name = "VER")]
+    #[arg(long, short = 'v', value_name = "VER")]
     pub version: Option<String>,
 
     /// A modpack file, handled by a source-provider plugin
-    #[arg(value_name = "PACK")]
+    #[arg(long = "file", short = 'f', value_name = "PACK")]
     pub pack: Option<String>,
 
     /// Install a missing Java runtime without prompting
@@ -114,18 +114,22 @@ pub struct InstallArgs {
     pub accept_eula: bool,
 
     /// Reinstall over an existing server (overwrites server.jar, no backup)
-    #[arg(long)]
+    #[arg(long, short = 'F')]
     pub force: bool,
 }
 
 #[derive(Debug, clap::Args)]
 pub struct UpgradeArgs {
+    /// Server type: vanilla, paper, fabric or neoforge
+    #[arg(long = "type", short = 't', value_name = "TYPE")]
+    pub server_type: Option<ServerType>,
+
     /// Minecraft version, or "latest"
-    #[arg(long, value_name = "VER")]
+    #[arg(long, short = 'v', value_name = "VER")]
     pub version: Option<String>,
 
     /// A new modpack file, handled by a source-provider plugin
-    #[arg(value_name = "PACK")]
+    #[arg(long = "file", short = 'f', value_name = "PACK")]
     pub pack: Option<String>,
 
     /// Install a missing Java runtime without prompting
@@ -133,11 +137,11 @@ pub struct UpgradeArgs {
     pub yes: bool,
 
     /// Reinstall even when already at the target version
-    #[arg(long)]
+    #[arg(long, short = 'F')]
     pub force: bool,
 
     /// Proceed without a pre-upgrade backup
-    #[arg(long)]
+    #[arg(long, short = 'n')]
     pub no_backup: bool,
 }
 
@@ -219,6 +223,7 @@ mod tests {
                 force: false,
             }),
             Command::Upgrade(UpgradeArgs {
+                server_type: None,
                 version: None,
                 pack: None,
                 yes: false,
@@ -260,8 +265,8 @@ mod tests {
     }
 
     #[test]
-    fn install_accepts_a_pack_positionally() {
-        let cli = Cli::try_parse_from(["mc", "install", "pack.mrpack", "--accept-eula"]).unwrap();
+    fn install_accepts_a_pack_with_file_flag() {
+        let cli = Cli::try_parse_from(["mc", "install", "-f", "pack.mrpack", "--accept-eula"]).unwrap();
         match cli.command {
             Command::Install(args) => {
                 assert_eq!(args.pack.as_deref(), Some("pack.mrpack"));

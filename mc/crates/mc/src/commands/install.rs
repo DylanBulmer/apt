@@ -28,6 +28,7 @@ pub struct InstallArgs {
 }
 
 pub struct UpgradeArgs {
+    pub server_type: Option<ServerType>,
     pub version: Option<String>,
     pub pack: Option<std::path::PathBuf>,
     pub assume_yes: bool,
@@ -142,16 +143,21 @@ pub fn upgrade(ctx: &Ctx, args: UpgradeArgs) -> Result<()> {
     // without `--version`, contradicting its own documentation.
     let target = args.version.clone().unwrap_or_else(|| "latest".to_string());
 
+    // The target type is the explicitly requested one, or the currently
+    // installed one. `--type` lets an operator switch from vanilla to fabric
+    // in a single upgrade, keeping the backup and graceful stop.
+    let target_type = args.server_type.unwrap_or(cfg.server.server_type);
+
     // Decide whether there is anything to do BEFORE the backup and the stop.
     // Those are the expensive parts — a full archive of the world, then
     // downtime a populated server stretches to five minutes — and an upgrade
     // run on a schedule lands here with nothing to do most times it fires.
     // A pack is always installed: it pins every mod as well as the version, so
     // there is nothing cheaper to compare against.
-    if args.pack.is_none() && !args.force && cfg.server.server_type.version_identifies_artifact() {
-        let source = sources::for_type(cfg.server.server_type);
+    if args.pack.is_none() && !args.force && target_type.version_identifies_artifact() {
+        let source = sources::for_type(target_type);
         if let Some(resolved) = source.resolve(ctx.http.as_ref(), &target)
-            && resolved == cfg.server.version
+            && resolved == cfg.server.version && target_type == cfg.server.server_type
         {
             ui::info(format!(
                 "Already running {} {resolved} — nothing to upgrade.",
@@ -183,6 +189,7 @@ pub fn upgrade(ctx: &Ctx, args: UpgradeArgs) -> Result<()> {
     if let Some(pack) = &args.pack {
         crate::commands::pack::install_from_pack(ctx, pack, &mut cfg)?;
     } else {
+        cfg.server.server_type = target_type;
         cfg.server.version = target;
         let resolved = install_artifact(ctx, &cfg)?;
         cfg.server.version = resolved;
@@ -229,6 +236,10 @@ pub(super) fn install_artifact(ctx: &Ctx, cfg: &Config) -> Result<String> {
             let from = staging.path().join("server.jar");
             let to = ctx.paths.server_jar();
             std::fs::rename(&from, &to).at(&to)?;
+            // Switching from NeoForge (Tree) to a Jar-based type leaves
+            // `run.sh` behind, which would cause `mc serve` to launch through
+            // the wrong path. Clean up the NeoForge tree artefacts.
+            clean_neoforge_tree(&ctx.paths.base())?;
         }
         Layout::Tree => {
             // The installer populated a whole tree; merge it over MC_BASE
@@ -275,6 +286,25 @@ pub(super) fn merge_tree(from: &Path, to: &Path) -> Result<()> {
             std::fs::copy(&src, &dst).at(&dst)?;
         }
     }
+    Ok(())
+}
+
+/// Remove the NeoForge tree artefacts when switching to a Jar-based type.
+///
+/// NeoForge installs `run.sh`, `libraries/`, `versions/` and `user_jvm_args.txt`.
+/// A Jar-based type (Vanilla, Paper, Fabric) uses `java -jar server.jar` instead,
+/// and `mc serve` picks the launcher by checking for `run.sh` — so a leftover
+/// file would cause it to launch through the wrong path.
+///
+/// Only removes known NeoForge files; user-generated content (worlds,
+/// playerdata, whitelist, etc.) is never touched.
+fn clean_neoforge_tree(base: &Path) -> Result<()> {
+    // Best-effort: a missing file is not an error (already cleaned, or never
+    // installed NeoForge in the first place).
+    let _ = std::fs::remove_file(base.join("run.sh"));
+    let _ = std::fs::remove_file(base.join("user_jvm_args.txt"));
+    let _ = std::fs::remove_dir_all(base.join("libraries"));
+    let _ = std::fs::remove_dir_all(base.join("versions"));
     Ok(())
 }
 

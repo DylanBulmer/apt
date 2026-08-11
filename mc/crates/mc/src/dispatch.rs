@@ -58,6 +58,7 @@ fn upgrade(ctx: &Ctx, args: crate::cli::UpgradeArgs) -> Result<()> {
     commands::install::upgrade(
         ctx,
         commands::install::UpgradeArgs {
+            server_type: args.server_type,
             version: args.version,
             pack: args.pack.map(std::path::PathBuf::from),
             assume_yes: args.yes,
