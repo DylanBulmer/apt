@@ -1,40 +1,54 @@
 ---
 name: file-structure
-description: Map of and exploration guide for the apt.bulmer.dev repo — which crate owns which concern, how crates/ and packages/ relate, where a given kind of change belongs, and cargo-oriented recipes for finding code without loading whole files. Use BEFORE ls/find/grep when locating code, deciding where a change belongs, or orienting in the mc workspace. For running or writing tests see the `testing` skill; for adding a plugin see `plugin-development`.
+description: Map of and exploration guide for the apt.bulmer.dev monorepo — the mc/ (product) and apt/ (distribution) split, which crate owns which concern, how crates/ and packages/ relate, where a given kind of change belongs, and cargo-oriented recipes for finding code without loading whole files. Use BEFORE ls/find/grep when locating code, deciding where a change belongs, or orienting in the workspace. For running or writing tests see the `testing` skill; for adding a plugin see `plugin-development`.
 ---
 
 # apt.bulmer.dev structure & exploration
 
-A Debian apt repository shipping four packages that manage a Minecraft server.
-Read this instead of running `ls -R` or broad greps.
+A monorepo with two components: **`mc/`**, a Minecraft server manager shipped as
+four Debian packages, and **`apt/`**, the repository that publishes them. Read
+this instead of running `ls -R` or broad greps.
 
-## The two trees
+```
+mc/                          the product
+  Cargo.toml Cargo.lock      the workspace; the lock IS tracked
+  rust-toolchain.toml        pins rustc for local builds, CI and the container
+  clippy.toml                relaxes the no-panic lints for #[cfg(test)] only
+  crates/mc-common/          shared library, linked statically by everything
+  crates/mc/                 → /usr/bin/mc                    (mc-server)
+  crates/mc-rcon/            → /usr/libexec/mc/mc-rcon, /usr/bin/rcon
+  crates/mc-backup/          → /usr/libexec/mc/mc-backup
+  crates/mc-mrpack/          → /usr/libexec/mc/mc-mrpack
+  packages/*/                DEBIAN metadata, units, conffiles, manifests
+  scripts/build.sh           builds one .deb
+  tests/run.sh               tier-4 container suites; see the `testing` skill
+  dist/ staging/ target/     build output, gitignored
 
-**`crates/`** is the Rust workspace: everything compiled.
-**`packages/<name>/`** mirrors the target filesystem root: everything not
-compiled. `packages/mc-server/etc/minecraft/config.toml` installs to
-`/etc/minecraft/config.toml`. `DEBIAN/` is control metadata and is the one
+apt/                         the distribution
+  conf/distributions         reprepro config; db/ dists/ pool/ are generated
+  bulmer.asc                 the public signing key
+  scripts/publish.sh         signs a .deb and includes it (reprepro -b apt)
+  Dockerfile nginx.conf      the image that serves the repo — apt/ IS its
+                             build context, so its COPY paths have no prefix
+  k8s/                       deployment of that image
+
+.github/workflows/publish.yml  test gate → per-arch build → publish → image
+CLAUDE.md README.md LICENSE .claude/skills/
+```
+
+**Inside `mc/`, two trees.** `crates/` is everything compiled;
+`packages/<name>/` mirrors the target filesystem root — everything not.
+`mc/packages/mc-server/etc/minecraft/config.toml` installs to
+`/etc/minecraft/config.toml`. `DEBIAN/` is control metadata and the one
 directory that is not a real install path.
 
-`scripts/build.sh` joins them: it cargo-builds the named binaries and copies
+`mc/scripts/build.sh` joins them: it cargo-builds the named binaries and copies
 them into a staging copy of `packages/<name>/`. **The `[[bin]]` names in
 `Cargo.toml` and the `case` in `build.sh` must agree** — a rename on one side
 produces a `.deb` with a missing executable.
 
-```
-crates/mc-common/     shared library, linked statically by everything
-crates/mc/            → /usr/bin/mc                       (mc-server)
-crates/mc-rcon/       → /usr/libexec/mc/mc-rcon, /usr/bin/rcon
-crates/mc-backup/     → /usr/libexec/mc/mc-backup
-crates/mc-mrpack/     → /usr/libexec/mc/mc-mrpack
-packages/*/           DEBIAN metadata, units, conffiles, plugin manifests
-scripts/build.sh      builds one .deb
-scripts/publish.sh    signs a .deb and adds it to reprepro
-tests/run.sh          tier-4 container suites; see the `testing` skill
-repo/conf/distributions  reprepro config; repo/bulmer.asc is the public key
-.github/workflows/publish.yml  test gate → per-arch build → publish → image
-k8s/, Dockerfile, nginx.conf   the container that serves the apt repo
-```
+**Cargo commands run from `mc/`**, which is the workspace root; `tests/run.sh`
+works from anywhere because it resolves its own root.
 
 ## Which crate owns what
 
@@ -100,39 +114,39 @@ nothing from it is mirrored into the first — read it with
 
 ```sh
 # What a symbol is and where — faster and more accurate than grep.
-cargo doc --workspace --no-deps --open
+(cd mc && cargo doc --workspace --no-deps --open)
 
 # Every caller of a function, with types.
-grep -rn "properties::secure" crates/
+grep -rn "properties::secure" mc/crates/
 
 # One module, not the whole crate.
-sed -n '/^pub fn merge/,/^}/p' crates/mc-common/src/properties.rs
+sed -n '/^pub fn merge/,/^}/p' mc/crates/mc-common/src/properties.rs
 
 # What a crate exposes.
-grep -n "^pub " crates/mc-common/src/lib.rs
+grep -n "^pub " mc/crates/mc-common/src/lib.rs
 
 # Trace a setting end to end: default → config → consumer.
-grep -rn "backup.keep\|BackupConfig" crates/ packages/
+grep -rn "backup.keep\|BackupConfig" mc/crates/ mc/packages/
 
 # Does this change need a version bump? (It does.)
-grep -rn "^Version:" packages/*/DEBIAN/control
+grep -rn "^Version:" mc/packages/*/DEBIAN/control
 ```
 
 **Read the tests to learn the contract.** Every non-obvious behaviour has a
 test named after the property it protects
 (`a_pack_cannot_choose_the_rcon_password`,
 `newest_means_document_order_not_alphabetical_order`). `grep -rn "fn a_\|fn the_"
-crates/` is a readable index of what this code promises.
+mc/crates/` is a readable index of what this code promises.
 
 ### Anti-patterns
 
 - **Don't `ls -R`** — the layout is above and does not change often.
 - **Don't hardcode a path.** Everything comes from `Paths`, which is a struct so
   tests can point it at a temp root.
-- **Don't search generated trees.** `target/`, `dist/`, `staging/`, and
-  `repo/{db,dists,pool}/` are build output.
+- **Don't search generated trees.** `mc/{target,dist,staging}/` and
+  `apt/{db,dists,pool}/` are build output.
 - **Don't infer intent from code alone.** Comments here state the constraint the
-  code satisfies — the sentinel ordering in `mc-rcon/src/protocol.rs`, the
+  code satisfies — the sentinel ordering in `mc/crates/mc-rcon/src/protocol.rs`, the
   managed-key re-apply in `properties::merge`, the `ZGenerational` version
   window in `java::default_flags`. Read the comment before changing the code it
   guards.
@@ -143,14 +157,14 @@ crates/` is a readable index of what this code promises.
 
 | Change | Goes |
 |---|---|
-| New `mc` subcommand | `cli.rs` (variant **and** `requirement()`) + `dispatch.rs` + a handler in `commands/` |
-| New server type | a module in `crates/mc/src/sources/` + a `ServerType` variant |
+| New `mc` subcommand | `mc/crates/mc/src/cli.rs` (variant **and** `requirement()`) + `dispatch.rs` + a handler in `commands/` |
+| New server type | a module in `mc/crates/mc/src/sources/` + a `ServerType` variant |
 | New capability, new command, or a new hook consumer | **a new plugin package** — see `plugin-development` |
 | New hook event | `plugin::Event` + the dispatch site + the `plugin-development` table |
-| Launch/JVM/GC behaviour | `commands/serve.rs`, `java::default_flags` |
+| Launch/JVM/GC behaviour | `mc/crates/mc/src/commands/serve.rs`, `java::default_flags` |
 | Shutdown behaviour | `mc-rcon`'s `pre-stop` hook (recompute `TimeoutStopSec` if timings move) |
-| Install-time ownership | `packages/mc-server/DEBIAN/postinst` |
-| New setting for how mc runs the server | `config.rs` + `packages/mc-server/etc/minecraft/config.toml` |
+| Install-time ownership | `mc/packages/mc-server/DEBIAN/postinst` |
+| New setting for how mc runs the server | `mc-common/src/config.rs` + `mc/packages/mc-server/etc/minecraft/config.toml` |
 | New setting for what the game does | `server.properties` — never mirrored into config.toml |
 
 ## Runtime paths

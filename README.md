@@ -399,19 +399,29 @@ a player count that could not be determined. `mc logs` shows which.
 
 ## Development
 
+This is a monorepo with two components:
+
+```
+mc/    the product — cargo workspace (crates/), Debian packaging (packages/),
+       tests and build script
+apt/   the distribution — reprepro config, signing key, publish script, and the
+       nginx image that serves the repository
+```
+
 ```bash
+cd mc                      # the cargo workspace root
 cargo test --workspace     # unit, integration and security suites — ~1 s
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 
-tests/run.sh               # container suites (Docker) — packaging, ACLs, plugins
-tests/run.sh --all         # + one real install of each server type
+mc/tests/run.sh            # container suites (Docker) — packaging, ACLs, plugins
+mc/tests/run.sh --all      # + one real install of each server type
 
-bash scripts/build.sh mc-server   # → dist/*.deb  (needs Debian, or the container)
+bash mc/scripts/build.sh mc-server   # → mc/dist/*.deb  (needs Debian, or the container)
 ```
 
-The workspace is `crates/`; `packages/<name>/` mirrors the target filesystem
-root and holds everything not compiled. `scripts/build.sh` joins them.
+Inside `mc/`, `crates/` is everything compiled and `packages/<name>/` mirrors
+the target filesystem root — everything not. `mc/scripts/build.sh` joins them.
 
 **Bump `Version:` in `DEBIAN/control` in the same commit as any change to a
 package.** CI publishes on every push and reprepro regenerates its indexes per

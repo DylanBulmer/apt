@@ -14,8 +14,8 @@ LABEL org.opencontainers.image.title="apt.bulmer.dev" \
       org.opencontainers.image.revision="${GIT_COMMIT_SHA}"
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY repo/dists/ /usr/share/nginx/html/dists/
-COPY repo/pool/  /usr/share/nginx/html/pool/
+COPY dists/ /usr/share/nginx/html/dists/
+COPY pool/  /usr/share/nginx/html/pool/
 
 # GPG public key for clients to verify the repo
-COPY repo/bulmer.asc /usr/share/nginx/html/bulmer.asc
+COPY bulmer.asc /usr/share/nginx/html/bulmer.asc

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Container suites for the mc packages.
 #
-#   tests/run.sh                 integration suites          (~1 min, no network)
-#   tests/run.sh --all           + the install-type matrix   (~3 min, real APIs)
-#   tests/run.sh integration/plugins   one suite (path under tests/suites, no .sh)
-#   tests/run.sh --shell         drop into the container with everything installed
+# Invoked from anywhere — it resolves its own root — so the paths below are
+# written as they read from the repository root.
+#
+#   mc/tests/run.sh                 integration suites       (~1 min, no network)
+#   mc/tests/run.sh --all           + the install-type matrix (~3 min, real APIs)
+#   mc/tests/run.sh integration/plugins  one suite (path under tests/suites, no .sh)
+#   mc/tests/run.sh --shell         container shell with everything installed
 #
 # THIS IS TIER 4 ONLY. Everything that does not need a Debian root — parsing,
 # validation, install/upgrade ordering, the exit-code policy, hook semantics —

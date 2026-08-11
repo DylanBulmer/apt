@@ -5,34 +5,14 @@ on:
     branches: [main]
     tags: ['v*']
     paths:
-      - crates/**
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - clippy.toml
-      - packages/**
-      - scripts/**
-      - tests/**
-      - repo/conf/**
-      - Dockerfile
-      - nginx.conf
-      - k8s/**
+      - mc/**
+      - apt/**
       - .github/workflows/publish.yml
   pull_request:
     branches: [main]
     paths:
-      - crates/**
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - clippy.toml
-      - packages/**
-      - scripts/**
-      - tests/**
-      - repo/conf/**
-      - Dockerfile
-      - nginx.conf
-      - k8s/**
+      - mc/**
+      - apt/**
       - .github/workflows/publish.yml
   workflow_dispatch:
     inputs:
@@ -62,13 +42,23 @@ jobs:
     if: ${{ inputs.republish != true }}
     name: Test
     runs-on: ubuntu-latest
+    # The cargo workspace is mc/, not the repository root: the root holds the
+    # product and the apt repository that publishes it side by side.
+    defaults:
+      run:
+        working-directory: mc
     steps:
       - uses: actions/checkout@v4
 
       # rust-toolchain.toml pins the version; this action honours it, so CI and
       # a developer's machine compile with the same rustc and the same lints.
       - uses: dtolnay/rust-toolchain@stable
+      # Neither action honours `defaults.run.working-directory`, so both are
+      # pointed at the workspace explicitly. Without this the cache key is
+      # computed from a Cargo.lock that is not there, and every run is a miss.
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mc
 
       - name: Formatting
         run: cargo fmt --all --check
@@ -109,12 +99,17 @@ jobs:
 
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: mc
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mc
 
       - name: Install build dependencies
         run: |
@@ -146,7 +141,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.arch }}
-          path: dist/*.deb
+          path: mc/dist/*.deb
           if-no-files-found: error
           retention-days: 90
 
@@ -178,7 +173,7 @@ jobs:
         with:
           pattern: packages-*
           merge-multiple: true
-          path: dist
+          path: mc/dist
 
       # The reprepro pool/dists trees are gitignored and regenerated on every
       # run, so "republish without rebuilding" means: reuse the .deb files
@@ -220,9 +215,9 @@ jobs:
           fi
 
           echo "Reusing packages from run ${run_id}"
-          mkdir -p dist
-          find artifacts -name '*.deb' -exec cp -v {} dist/ \;
-          if [ -z "$(find dist -name '*.deb' -print -quit)" ]; then
+          mkdir -p mc/dist
+          find artifacts -name '*.deb' -exec cp -v {} mc/dist/ \;
+          if [ -z "$(find mc/dist -name '*.deb' -print -quit)" ]; then
             echo "::error::Run ${run_id} yielded no .deb files after extraction."
             exit 1
           fi
@@ -238,15 +233,15 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           shopt -s nullglob
-          debs=(dist/*.deb)
+          debs=(mc/dist/*.deb)
           if [ ${#debs[@]} -eq 0 ]; then
             echo "::error::No .deb files available to publish."
             exit 1
           fi
           for deb in "${debs[@]}"; do
-            bash scripts/publish.sh "$deb"
+            bash apt/scripts/publish.sh "$deb"
           done
-          reprepro -b repo list stable
+          reprepro -b apt list stable
 
       - name: Compute image build metadata
         if: github.event_name != 'pull_request'
@@ -292,7 +287,9 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
         with:
-          context: .
+          # apt/ is the context: it holds the Dockerfile, the nginx config, the
+          # public key, and the dists/ and pool/ trees reprepro just generated.
+          context: apt
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

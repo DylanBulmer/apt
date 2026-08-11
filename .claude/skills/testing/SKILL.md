@@ -8,17 +8,19 @@ description: How to test and verify changes to the mc packages — the four test
 ## Run it
 
 ```sh
+cd mc                             # the cargo workspace root
 cargo test --workspace            # tiers 1-3   ~1 s, no Docker, no root, no network
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 
-tests/run.sh                      # tier 4      ~1 min, Docker, root
-tests/run.sh --all                # + the live install matrix   ~3 min, real APIs
-tests/run.sh integration/plugins  # one suite
-tests/run.sh --shell              # container shell, packages installed
+mc/tests/run.sh                      # tier 4 — resolves its own root, so run it
+                                     # from anywhere.  ~1 min, Docker, root
+mc/tests/run.sh --all                # + the live install matrix   ~3 min, real APIs
+mc/tests/run.sh integration/plugins  # one suite
+mc/tests/run.sh --shell              # container shell, packages installed
 ```
 
-The toolchain is pinned by `rust-toolchain.toml`. Cargo is at `~/.cargo/bin`;
+The toolchain is pinned by `mc/rust-toolchain.toml`. Cargo is at `~/.cargo/bin`;
 add `. "$HOME/.cargo/env"` to your profile if `cargo` is not on `PATH`.
 
 ## The four tiers, and how to pick one
@@ -31,9 +33,9 @@ harder to read.
 | Tier | Where | Needs | For |
 |---|---|---|---|
 | 1 | `#[cfg(test)]` in the crate | nothing | pure logic: parsers, validators, schedules, encodings |
-| 2 | `crates/*/tests/*.rs` | nothing | real command handlers against a temp root |
+| 2 | `mc/crates/*/tests/*.rs` | nothing | real command handlers against a temp root |
 | 3 | `#[cfg(test)]` / `tests/` | nothing | the security regression corpus — every hostile input that must be refused |
-| 4 | `tests/suites/integration/` | Docker + root | dpkg, real ownership, the service account, plugin install/removal |
+| 4 | `mc/tests/suites/integration/` | Docker + root | dpkg, real ownership, the service account, plugin install/removal |
 
 Tier 4 also holds `install-types`, the only thing that reaches the real
 upstream APIs.
@@ -115,7 +117,7 @@ resolved the pin to itself and reported "nothing to upgrade" forever.
 every start polled to timeout. → A fake's *happy path* must match reality; the
 scripted queue is for producing the interesting cases, not the ordinary one.
 
-**`clippy.toml`'s `allow-unwrap-in-tests` does not cover `tests/`.** It applies
+**`mc/clippy.toml`'s `allow-unwrap-in-tests` does not cover `tests/`.** It applies
 to `#[cfg(test)]` modules only; integration test crates are separate crates and
 the workspace's `unwrap_used`/`panic` denials hit them.
 → Each file in `tests/` carries a crate-level
@@ -124,7 +126,8 @@ the workspace's `unwrap_used`/`panic` denials hit them.
 **Good libraries refuse to build hostile fixtures.** The `tar` crate will not
 *write* a member path containing `..`, which is correct and exactly why the
 traversal fixture cannot go through it.
-→ Hand-write the 512-byte header (`build_raw` in `mc-backup/src/archive.rs`),
+→ Hand-write the 512-byte header (`build_raw` in
+`mc/crates/mc-backup/src/archive.rs`),
 and keep `the_raw_fixture_builder_produces_a_readable_archive` beside it — a
 malformed hand-built header would make every traversal case "fail validation"
 for the wrong reason, and the checks would never actually run.
@@ -134,12 +137,12 @@ for the wrong reason, and the checks would never actually run.
 **`${shlibs:Depends}` is a debhelper variable and nothing substitutes it under
 plain `dpkg-deb`.** Shipped literally, it produces a package apt refuses — and
 the `.deb` builds, packages and uploads perfectly happily.
-→ `scripts/build.sh` resolves it with `dpkg-shlibdeps`, falling back to `libc6`.
+→ `mc/scripts/build.sh` resolves it with `dpkg-shlibdeps`, falling back to `libc6`.
 CI and `integration/packaging` both assert no `${` survives in `Depends`.
 
 **A binary built on a newer glibc than the target fails at exec.** The symptom
 is `version GLIBC_2.xx not found` — after a successful build, package and
-install. → Build in `rust:1-trixie` (`tests/Dockerfile.build`), never on the
+install. → Build in `rust:1-trixie` (`mc/tests/Dockerfile.build`), never on the
 host and never on a newer base image.
 
 **`systemctl is-system-running` is a health check, not a presence check.** It
@@ -161,7 +164,7 @@ curl -s https://apt.bulmer.dev/dists/stable/main/binary-amd64/Packages | grep -A
 
 **A plugin manifest and its binary are shipped by the same package and can still
 drift.** A rename in `Cargo.toml`'s `[[bin]]` that is not made in
-`scripts/build.sh` produces a `.deb` with no executable in it.
+`mc/scripts/build.sh` produces a `.deb` with no executable in it.
 → `build.sh` fails loudly on a missing binary; `integration/packaging` asserts
 every manifest's `bin` exists and is executable.
 
@@ -181,7 +184,7 @@ Assert mode *and* owner.
 
 **PaperMC v2 is sunset** — `api.papermc.io/v2` returns HTTP 410. v3 lives at
 `fill.papermc.io/v3` with a different shape (see the porting trap above).
-`tests/run.sh --all` is what catches this class of breakage; the offline
+`mc/tests/run.sh --all` is what catches this class of breakage; the offline
 fixtures cannot.
 
 **Don't judge a launcher by its exit code.** NeoForge's FML wrapper exits 1 even
@@ -204,7 +207,10 @@ that ignores NeoForge's overlapping version scheme fails loudly.
 ## Test-environment gotchas
 
 - **Mount the repo read-only** and copy it inside before building —
-  `scripts/build.sh` writes `dist/`, `staging/` and `target/`.
+  `mc/scripts/build.sh` writes `dist/`, `staging/` and `target/`.
+- **`tests/run.sh` copies `mc/` into the build container**, not the whole
+  repository: `apt/` holds reprepro state and a public web root, neither of
+  which belongs in a build context.
 - **Cargo caches live in named Docker volumes** (`mc-cargo-registry`,
   `mc-cargo-target`). Without them every run recompiles the dependency graph,
   which dominates the suite's runtime far more than any test.

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Three skills in `.claude/skills/` carry most of the operational detail, and
 using them is much cheaper than rediscovering it:
 
-- **`file-structure`** — which crate owns which concern, how `crates/` and
+- **`file-structure`** — which crate owns which concern, how `mc/crates/` and
   `packages/` relate, where a change belongs, and cargo-oriented recipes for
   reading one function instead of a whole file. Use it *before* `ls`/`find`/
   broad `grep`.
@@ -25,20 +25,30 @@ Don't restate it here; do check it for drift when behaviour changes.
 ## Commands
 
 ```sh
+cd mc                           # the cargo workspace root
 cargo test --workspace          # tiers 1-3   ~1 s, no Docker, no root, no network
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 
-tests/run.sh                    # tier 4 container suites   ~1 min
-tests/run.sh --all              # + the live install matrix ~3 min, real APIs
+mc/tests/run.sh                 # tier 4 container suites   ~1 min
+mc/tests/run.sh --all           # + the live install matrix ~3 min, real APIs
 
-bash scripts/build.sh mc-server # → dist/*.deb (needs dpkg-deb, i.e. Debian)
-bash scripts/publish.sh dist/mc-server_<ver>_<arch>.deb   # needs reprepro + the key
+bash mc/scripts/build.sh mc-server            # → mc/dist/*.deb (needs Debian)
+bash apt/scripts/publish.sh mc/dist/<pkg>.deb # needs reprepro + the signing key
 ```
 
-Cargo lives at `~/.cargo/bin`; the toolchain is pinned by `rust-toolchain.toml`.
-Publishing is normally CI's job — pushing to `main` runs the test gate, builds
-per architecture, and indexes automatically.
+`mc/tests/run.sh` and both scripts resolve their own roots, so they run from
+anywhere; `cargo` needs `mc/`. Cargo lives at `~/.cargo/bin`; the toolchain is
+pinned by `mc/rust-toolchain.toml`. Publishing is normally CI's job — pushing to
+`main` runs the test gate, builds per architecture, and indexes automatically.
+
+## Repository layout
+
+Two components. **`mc/`** is the product: the cargo workspace (`crates/`), the
+Debian packaging trees (`packages/`), its tests and its build script.
+**`apt/`** is the distribution: reprepro config, the signing key, `publish.sh`,
+and the nginx image that serves the repository — `apt/` is that image's whole
+build context, which is why its `COPY` paths carry no prefix.
 
 ## Architecture
 
@@ -119,7 +129,7 @@ struct rather than a set of constants so tests can point it at a temp root via
 
 **The workspace denies `unwrap`, `expect`, `panic` and indexing.** A panic in
 `mc serve` is an outage whose cause is an address in the journal. Tests are
-exempt (`clippy.toml`), but integration test crates under `tests/` need the
+exempt (`mc/clippy.toml`), but integration test crates under `tests/` need the
 allow at crate level — the config option only covers `#[cfg(test)]` modules.
 
 **Bump `Version:` in `DEBIAN/control` in the same commit as the change.** CI

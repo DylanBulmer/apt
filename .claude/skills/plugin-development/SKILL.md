@@ -142,20 +142,20 @@ take `require_root_or_group`, anything that writes takes `require_root`.
 
 ## Adding a plugin: the checklist
 
-1. **`crates/mc-<name>/`** — a `[[bin]]` named `mc-<name>`, `mc-common` as a
+1. **`mc/crates/mc-<name>/`** — a `[[bin]]` named `mc-<name>`, `mc-common` as a
    dependency, `[lints] workspace = true`.
-2. **`packages/mc-<name>/`** — mirrors the target root:
+2. **`mc/packages/mc-<name>/`** — mirrors the target root:
    `DEBIAN/control` (`Depends: mc-server, ${shlibs:Depends}`),
    `usr/lib/mc/plugins.d/<name>.toml`, any units.
-3. **`scripts/build.sh`** — add the package to the `case`, mapping each
+3. **`mc/scripts/build.sh`** — add the package to the `case`, mapping each
    `[[bin]]` name to its install path. A rename on one side and not the other
    produces a `.deb` with a missing executable and a build that still reports
    success, so the copy fails loudly instead.
-4. **`tests/run.sh`** — add the package to the build loop and bump the expected
+4. **`mc/tests/run.sh`** — add the package to the build loop and bump the expected
    `.deb` count.
-5. **`Cargo.toml`** — add the crate to `members`.
+5. **`mc/Cargo.toml`** — add the crate to `members`.
 6. **Tests.** Tier 1 for the logic; a case in
-   `tests/suites/integration/plugins.sh` for install → command appears →
+   `mc/tests/suites/integration/plugins.sh` for install → command appears →
    `apt remove` → command withdrawn, core still working.
 7. **Bump `Version:`** in `DEBIAN/control` in the same commit. CI publishes on
    every push touching these paths and reprepro regenerates per run, so a change
@@ -165,7 +165,7 @@ take `require_root_or_group`, anything that writes takes `require_root`.
 ## The smallest useful plugin
 
 ```rust
-// crates/mc-hello/src/main.rs
+// mc/crates/mc-hello/src/main.rs
 use mc_common::{Paths, error::{Error, Result}, ui};
 use std::io::Read as _;
 
@@ -200,7 +200,7 @@ fn main() -> std::process::ExitCode {
 ```
 
 ```toml
-# packages/mc-hello/usr/lib/mc/plugins.d/hello.toml
+# mc/packages/mc-hello/usr/lib/mc/plugins.d/hello.toml
 abi  = 1
 name = "hello"
 bin  = "/usr/libexec/mc/mc-hello"
