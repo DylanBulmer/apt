@@ -16,7 +16,6 @@
 //! rewrites that file, so nothing here mirrors a value out of it. Read at the
 //! point of use, or it can only go stale.
 
-pub mod chat;
 pub mod config;
 pub mod error;
 pub mod eula;

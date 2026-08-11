@@ -23,6 +23,31 @@ use std::time::Duration;
 /// Seconds-remaining marks at which players are warned.
 pub const MARKS: [u32; 3] = [300, 180, 60];
 
+/// How many players are online.
+///
+/// `Unknown` is NOT zero, and the distinction decides how long a shutdown
+/// takes. Every failure mode — no console installed, connection refused, auth
+/// failure, timeout, a reply in a wording nobody recognises — resolves here,
+/// and the countdown treats it exactly like "players are online". An
+/// unnecessary wait on an empty server is far cheaper than cutting off real
+/// players without warning.
+///
+/// Lives beside the schedule rather than beside either console's transport:
+/// how the count was obtained is the console's business, and what to do about
+/// it is policy every console must apply identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerCount {
+    Online(u32),
+    Unknown,
+}
+
+impl PlayerCount {
+    /// True when the server is PROVABLY empty. Anything else warns.
+    pub fn provably_empty(&self) -> bool {
+        matches!(self, PlayerCount::Online(0))
+    }
+}
+
 /// One step of a countdown: what to announce, and how long to wait afterwards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
@@ -111,28 +136,55 @@ mod tests {
 
     #[test]
     fn the_schedule_fits_inside_the_units_stop_timeout() {
-        // TimeoutStopSec=375 is derived from this path:
+        // TimeoutStopSec=380 is derived from this path:
+        //   console election     3 s   (plugin::PROBE_DEADLINE, see below)
         //   list query          15 s   (CMD_DEADLINE)
         //   countdown          300 s
         //   3 announcements     15 s   (3 x say budget, worst case)
         //   stop command        15 s
         //   chunk-flush sleep   10 s
         //   ------------------------
-        //   worst case         355 s   + 20 s buffer = 375 s
+        //   worst case         358 s   + 22 s buffer = 380 s
         //
-        // If this fails, the countdown was re-tiered without recomputing the
-        // unit — and overrunning TimeoutStopSec means a SIGKILL through the
-        // JVM's chunk flush.
-        const TIMEOUT_STOP_SEC: u64 = 375;
+        // ONE probe deadline, not one per installed console: the election
+        // stops at the first console that answers, and if none answers there
+        // is no elected console and therefore no countdown to pay for. The
+        // expensive path and the slow-probe path cannot both happen.
+        //
+        // If this fails, the countdown was re-tiered — or a probe deadline
+        // moved — without recomputing the unit, and overrunning
+        // TimeoutStopSec means a SIGKILL through the JVM's chunk flush.
+        //
+        // READ FROM THE UNIT, not restated here. A copy of the number would
+        // let the two drift in exactly the direction this test exists to
+        // catch: the arithmetic changes, the constant is updated, and the
+        // shipped unit keeps the old value.
+        let timeout_stop_sec = unit_timeout_stop_sec();
         const NON_COUNTDOWN_BUDGET: u64 = 15 + 15 + 15 + 10;
-        const SAFETY_BUFFER: u64 = 20;
+        const SAFETY_BUFFER: u64 = 22;
+        let election_budget = mc_common::plugin::PROBE_DEADLINE.as_secs();
 
-        let worst_case = total_wait(&schedule(&MARKS)).as_secs() + NON_COUNTDOWN_BUDGET;
-        assert_eq!(worst_case, 355);
+        let worst_case =
+            total_wait(&schedule(&MARKS)).as_secs() + NON_COUNTDOWN_BUDGET + election_budget;
+        assert_eq!(worst_case, 358);
         assert!(
-            worst_case + SAFETY_BUFFER <= TIMEOUT_STOP_SEC,
-            "countdown worst case {worst_case}s + buffer exceeds TimeoutStopSec={TIMEOUT_STOP_SEC}s"
+            worst_case + SAFETY_BUFFER <= timeout_stop_sec,
+            "countdown worst case {worst_case}s + {SAFETY_BUFFER}s buffer exceeds \
+             TimeoutStopSec={timeout_stop_sec}s in minecraft.service"
         );
+    }
+
+    /// `TimeoutStopSec=` as the shipped unit actually declares it.
+    fn unit_timeout_stop_sec() -> u64 {
+        let unit = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/mc-server/lib/systemd/system/minecraft.service");
+        let text =
+            std::fs::read_to_string(&unit).unwrap_or_else(|e| panic!("{}: {e}", unit.display()));
+
+        text.lines()
+            .find_map(|line| line.strip_prefix("TimeoutStopSec="))
+            .and_then(|value| value.trim().trim_end_matches('s').parse().ok())
+            .expect("minecraft.service declares TimeoutStopSec in seconds")
     }
 
     #[test]

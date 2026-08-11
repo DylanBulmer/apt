@@ -49,30 +49,37 @@ ExecStop=/usr/bin/mc shutdown
 ExecReload=/usr/bin/mc reload
 
 # Outer bound on the whole stop procedure (ExecStop + SIGTERM) before systemd
-# sends SIGKILL. Derived from the worst-case path through mc-rcon's pre-stop
-# hook — the 5-minute tier, taken whenever at least one player is online OR the
-# player count cannot be determined (everything except a provably empty server):
+# sends SIGKILL. Derived from the worst-case path through the elected console's
+# pre-stop hook — the 5-minute tier, taken whenever at least one player is
+# online OR the player count cannot be determined (everything except a provably
+# empty server):
 #
-#   list query           15 s   (CMD_DEADLINE)
+#   console election       3 s  (plugin::PROBE_DEADLINE)
+#   list query            15 s  (CMD_DEADLINE)
 #   countdown 300 180 60
-#     sleeps             300 s  (120 + 120 + 60)
-#     3x announcement     15 s  (worst case)
-#   stop command         15 s
+#     sleeps              300 s (120 + 120 + 60)
+#     3x announcement      15 s (worst case)
+#   stop command          15 s
 #   chunk-flush sleep     10 s
 #   ------------------------------
-#   worst case           355 s
-#   safety buffer         20 s
+#   worst case           358 s
+#   safety buffer         22 s
 #   ------------------------------
-#   TimeoutStopSec       375 s
+#   TimeoutStopSec       380 s
 #
-# On a healthy server the RCON calls are sub-millisecond, so the real elapsed
-# time is ~310 s and the JVM gets ~65 s after SIGTERM to finish exiting.
+# The election is charged ONCE, not once per installed console: it stops at the
+# first console that answers, and if none answers there is no elected console
+# and so no countdown to pay for either.
 #
-# THIS ARITHMETIC IS ASSERTED IN A TEST — mc-rcon's
-# `the_schedule_fits_inside_the_units_stop_timeout`. Re-tiering the countdown
-# without recomputing this value fails there rather than in production, where
-# overrunning it means a SIGKILL through the JVM's chunk flush.
-TimeoutStopSec=375s
+# On a healthy server the console calls are sub-millisecond, so the real elapsed
+# time is ~310 s and the JVM gets ~70 s after SIGTERM to finish exiting.
+#
+# THIS ARITHMETIC IS ASSERTED IN A TEST — mc-common's
+# `the_schedule_fits_inside_the_units_stop_timeout`, which READS THIS FILE.
+# Re-tiering the countdown without recomputing this value fails there rather
+# than in production, where overrunning it means a SIGKILL through the JVM's
+# chunk flush.
+TimeoutStopSec=380s
 TimeoutStartSec=60s
 
 # Only kill the main process; ExecStop handles the rest.

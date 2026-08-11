@@ -1,0 +1,41 @@
+[package]
+name = "mc-mgmt"
+description = "Minecraft Server Management Protocol console plugin for the mc server manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# → /usr/libexec/mc/mc-mgmt. Keep the name in step with scripts/build.sh.
+[[bin]]
+name = "mc-mgmt"
+path = "src/main.rs"
+
+[dependencies]
+mc-common = { workspace = true }
+mc-console = { workspace = true }
+serde = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Blocking, no async runtime. The whole toolchain is synchronous — a plugin
+# runs, does one job and exits — and pulling tokio in for a socket that carries
+# a handful of messages per invocation would be the largest dependency in the
+# tree by an order of magnitude.
+#
+# `rustls-tls-webpki-roots` so the client can also speak wss://. mc itself
+# talks to a loopback endpoint with TLS off, but an operator who enables the
+# protocol's own default must not find that mc is the one thing that cannot
+# connect. rustls is already in the graph via ureq, so this adds no new
+# cryptography.
+tungstenite = { version = "0.30", default-features = false, features = [
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -29,10 +29,10 @@ pub fn run(paths: &Paths, command: &str) -> Result<String> {
 
 /// Broadcast to every player, with no sender prefix.
 ///
-/// Goes through `mc_common::chat::say`, which builds a `tellraw` rather than a
+/// Goes through `crate::chat::say`, which builds a `tellraw` rather than a
 /// `say`: the server renders `say` from an RCON client as `[Rcon] …`.
 pub fn announce(connection: &mut Connection, message: &str) -> Result<String> {
-    connection.exec(&mc_common::chat::say(message))
+    connection.exec(&crate::chat::say(message))
 }
 
 /// Whether RCON is usable at all: a password exists and the server says it is

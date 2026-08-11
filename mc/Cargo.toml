@@ -3,8 +3,10 @@ resolver = "3"
 members = [
     "crates/mc-common",
     "crates/mc",
+    "crates/mc-console",
     "crates/mc-rcon",
     "crates/mc-backup",
+    "crates/mc-mgmt",
     "crates/mc-mrpack",
     # Build-time only, and the one member that ships in nothing: it renders
     # mc.1 from the clap tree for scripts/build.sh.
@@ -17,7 +19,7 @@ members = [
 # authority — see CLAUDE.md on why an unbumped Version: never reaches installed
 # systems.
 [workspace.package]
-version = "1.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
@@ -26,6 +28,7 @@ authors = ["Dylan Bulmer <dylan@bulmer.dev>"]
 
 [workspace.dependencies]
 mc-common = { path = "crates/mc-common" }
+mc-console = { path = "crates/mc-console" }
 
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"

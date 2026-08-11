@@ -7,6 +7,15 @@ bin  = "/usr/libexec/mc/mc-rcon"
 name  = "rcon"
 about = "Open an RCON console, or run one command against the server"
 
+# The baseline console: RCON is the only channel every supported Minecraft
+# version has. Priority 10 leaves room beneath for a fallback and above for
+# `mc-mgmt`, which speaks the management protocol on 1.21.9+ and takes over
+# whenever its probe succeeds.
+[[providers]]
+kind     = "console"
+name     = "rcon"
+priority = 10
+
 # Warn players and count them down before the server stops. Never fatal: a
 # shutdown must not abort because a warning could not be delivered.
 [[hooks]]

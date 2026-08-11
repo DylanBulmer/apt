@@ -1,9 +1,10 @@
 //! `/usr/libexec/mc/mc-rcon` — the plugin binary.
 //!
-//! Two entry points, matching the ABI-1 contract:
+//! Three entry points, matching the ABI-1 contract:
 //!
 //!   `mc-rcon command rcon [args…]`  — the `mc rcon` subcommand
 //!   `mc-rcon hook <event>`          — a hook, payload as JSON on stdin
+//!   `mc-rcon console probe`         — "can I talk to the server?", by exit code
 //!
 //! Not on `PATH` on purpose: it is invoked by core, and advertising
 //! `mc-rcon command rcon` as a command surface would be advertising an
@@ -16,13 +17,22 @@ use mc_common::error::{Error, Result};
 use mc_common::paths::{MC_USER, Paths, SERVICE_UNIT};
 use mc_common::properties::{self, Properties};
 use mc_common::{privilege, ui};
-use mc_rcon::countdown::{self, MARKS};
-use mc_rcon::players::{self, PlayerCount};
+use mc_console::countdown::PlayerCount;
+use mc_console::{Console, hooks};
+use mc_rcon::players;
 use mc_rcon::{password, session};
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths = Paths::from_env();
+
+    // Answered with an exit status and nothing else. Core probes every console
+    // on the shutdown path, and a server that simply has RCON switched off is
+    // not a fault worth a line in the journal every time it stops.
+    if args.first().map(String::as_str) == Some("console") {
+        let verb = args.get(1).map(String::as_str).unwrap_or_default();
+        return mc_console::answer_probe(verb, || usable(&paths));
+    }
 
     let result = match args.first().map(String::as_str) {
         Some("command") => command(&paths, args.get(1..).unwrap_or_default()),
@@ -39,6 +49,18 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(1))
         }
     }
+}
+
+// ── the console provider ───────────────────────────────────────────────────
+
+/// Can this console talk to the server right now?
+///
+/// Connecting, not just reading the config: `enable-rcon=true` in
+/// server.properties says only that the *next* start will listen. A server
+/// still running from before the setting changed would elect a console that
+/// then cannot deliver the countdown it promised.
+fn usable(paths: &Paths) -> bool {
+    session::configured(paths) && session::connect(paths).is_ok()
 }
 
 // ── the `mc rcon` subcommand ───────────────────────────────────────────────
@@ -260,96 +282,78 @@ fn hook(paths: &Paths, event: &str) -> Result<()> {
 /// countdown from a wedged connection. The announcements themselves are
 /// `tellraw`, which the server does not echo to its console, so this is the
 /// only record of what players were told.
-fn pre_stop(paths: &Paths) -> Result<()> {
-    if !session::configured(paths) {
-        log("RCON is not configured — no in-game warning and no graceful stop.");
-        return Ok(());
+/// RCON as a [`Console`].
+///
+/// The whole of this plugin's contribution to the lifecycle: the policy —
+/// who is warned, in what order, what happens when the count is unavailable —
+/// lives in `mc_console::hooks` and is shared with every other console.
+struct RconConsole(mc_rcon::protocol::Connection);
+
+impl Console for RconConsole {
+    fn say(&mut self, message: &str) -> Result<()> {
+        session::announce(&mut self.0, message).map(|_| ())
     }
 
-    let mut connection = match session::connect(paths) {
-        Ok(c) => c,
-        Err(e) => {
-            log(&format!(
-                "Could not reach the server ({e}); systemd will signal it directly."
-            ));
-            return Ok(());
-        }
-    };
-
-    log("Stop requested; asking the server who is online.");
-    let count = match connection.exec("list") {
-        Ok(reply) => players::parse(&reply),
-        Err(e) => {
-            log(&format!("Could not count players ({e})."));
-            PlayerCount::Unknown
-        }
-    };
-
-    match count {
-        PlayerCount::Online(0) => {
-            log("No players online — skipping the countdown and stopping immediately.");
-        }
-        PlayerCount::Online(n) => {
-            log(&format!(
-                "{n} player(s) online — triggering the 5-minute countdown."
-            ));
-            run_countdown(&mut connection);
-        }
-        // Logged differently from a counted zero on purpose: the journal must
-        // distinguish "we counted" from "we could not count", because the
-        // latter also indicates a console problem.
-        PlayerCount::Unknown => {
-            log(
-                "Player count unavailable — assuming players are online; triggering the 5-minute countdown.",
-            );
-            run_countdown(&mut connection);
+    fn player_count(&mut self) -> PlayerCount {
+        // Parsed out of prose, and `Unknown` for anything unrecognised. Forks
+        // word the reply differently, which is exactly why the countdown
+        // treats "could not count" as "assume somebody is online".
+        match self.0.exec("list") {
+            Ok(reply) => players::parse(&reply),
+            Err(e) => {
+                log(&format!("Could not count players ({e})."));
+                PlayerCount::Unknown
+            }
         }
     }
 
-    log("Sending 'stop' to the server.");
-    if let Err(e) = connection.exec("stop") {
-        log(&format!("WARNING: the stop command failed: {e}"));
+    fn save_now(&mut self) -> Result<()> {
+        self.0.exec("save-all").map(|_| ())
     }
 
-    // Give the JVM time to flush chunks and exit cleanly before systemd sends
-    // SIGTERM. TimeoutStopSec in the unit is the outer bound.
-    log("Waiting 10s for the server to flush chunks and exit.");
-    std::thread::sleep(std::time::Duration::from_secs(10));
-    Ok(())
+    fn set_autosave(&mut self, enabled: bool) -> Result<()> {
+        self.0
+            .exec(if enabled { "save-on" } else { "save-off" })
+            .map(|_| ())
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        self.0.exec("stop").map(|_| ())
+    }
 }
 
-fn run_countdown(connection: &mut mc_rcon::protocol::Connection) {
-    for step in countdown::schedule(&MARKS) {
-        // A failed announcement is reported and then ignored: players silently
-        // not being warned is exactly what an operator needs to know about,
-        // and the shutdown proceeds on schedule either way.
-        match session::announce(connection, &step.message) {
-            Ok(_) => log(&format!("Announced to players: {}", step.message)),
-            Err(e) => log(&format!(
-                "WARNING: could not announce '{}': {e}",
-                step.message
-            )),
-        }
-        if !step.wait.is_zero() {
-            // Logged so a long quiet stretch reads as "waiting on purpose"
-            // rather than "wedged".
-            log(&format!("Next warning in {}s.", step.wait.as_secs()));
-            std::thread::sleep(step.wait);
+/// Connect, or explain why this hook is doing nothing.
+///
+/// Never an error: a server with RCON switched off still stops and still gets
+/// backed up, just without the warning or the flush.
+fn console_for(paths: &Paths, without: &str) -> Option<RconConsole> {
+    if !session::configured(paths) {
+        log(&format!("RCON is not configured — {without}."));
+        return None;
+    }
+    match session::connect(paths) {
+        Ok(connection) => Some(RconConsole(connection)),
+        Err(e) => {
+            log(&format!("Could not reach the server ({e}) — {without}."));
+            None
         }
     }
+}
+
+fn pre_stop(paths: &Paths) -> Result<()> {
+    let Some(mut console) = console_for(paths, "no in-game warning and no graceful stop") else {
+        return Ok(());
+    };
+    hooks::pre_stop(&mut console, &|m: &str| log(m));
+    Ok(())
 }
 
 /// Flush the world and hold it still for the duration of an archive.
 fn pre_backup(paths: &Paths) -> Result<()> {
-    let Ok(mut connection) = session::connect(paths) else {
-        log("RCON unavailable — the backup will archive a world that was not flushed.");
+    let Some(mut console) = console_for(paths, "the backup will archive an unflushed world") else {
         return Ok(());
     };
-    let _ = session::announce(&mut connection, "[mc] Backup starting — brief lag possible");
-    let _ = connection.exec("save-off");
-    let _ = connection.exec("save-all");
-    // Give the flush a moment to reach disk before the archive starts reading.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    hooks::pre_backup(&mut console, &|m: &str| log(m));
     Ok(())
 }
 
@@ -359,11 +363,10 @@ fn pre_backup(paths: &Paths) -> Result<()> {
 /// fatal, and core invokes it on both paths. A live server left with saves
 /// disabled loses everything since the last flush the moment it stops.
 fn post_backup(paths: &Paths) -> Result<()> {
-    let Ok(mut connection) = session::connect(paths) else {
+    let Some(mut console) = console_for(paths, "saving may still be paused") else {
         return Ok(());
     };
-    let _ = connection.exec("save-on");
-    let _ = session::announce(&mut connection, "[mc] Backup complete");
+    hooks::post_backup(&mut console, &|m: &str| log(m));
     Ok(())
 }
 

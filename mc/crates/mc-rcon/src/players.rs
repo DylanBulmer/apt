@@ -1,25 +1,10 @@
 //! Reading a player count out of a `list` reply.
+//!
+//! The RCON-specific half of counting players: the wire format is a line of
+//! prose, and every fork words it differently. What to DO with the answer is
+//! policy shared with every other console — see [`mc_console::countdown`].
 
-/// How many players are online.
-///
-/// `Unknown` is NOT zero, and the distinction decides how long a shutdown
-/// takes. Every failure mode — RCON missing, connection refused, auth failure,
-/// timeout, empty output, wording we do not recognise — resolves here, and the
-/// countdown treats it exactly like "players are online". An unnecessary wait
-/// on an empty server is far cheaper than cutting off real players without
-/// warning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayerCount {
-    Online(u32),
-    Unknown,
-}
-
-impl PlayerCount {
-    /// True when the server is PROVABLY empty. Anything else warns.
-    pub fn provably_empty(&self) -> bool {
-        matches!(self, PlayerCount::Online(0))
-    }
-}
+use mc_console::PlayerCount;
 
 /// Parse the reply to `list`.
 ///

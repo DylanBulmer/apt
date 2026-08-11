@@ -77,6 +77,11 @@ fn plugins(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
 
+    // Resolved once, before the loop: electing probes each console, and
+    // `mc plugins` is a read-only command an operator runs to find out why
+    // something is not happening.
+    let elected = registry.console(&ctx.paths).map(|p| p.name.as_str());
+
     for plugin in registry.plugins() {
         let commands: Vec<&str> = plugin.commands.iter().map(|c| c.name.as_str()).collect();
         let hooks: Vec<String> = plugin.hooks.iter().map(|h| h.event.to_string()).collect();
@@ -89,11 +94,29 @@ fn plugins(ctx: &Ctx) -> Result<()> {
             println!("  hooks:    {}", hooks.join(", "));
         }
         for provider in &plugin.providers {
-            println!(
-                "  provides: {} ({})",
-                provider.name,
-                provider.extensions.join(", ")
-            );
+            match provider.kind.as_str() {
+                // Which console won is not visible anywhere else, and "my
+                // countdown stopped happening" is otherwise a mystery with no
+                // thread to pull.
+                "console" => println!(
+                    "  console:  {} (priority {}){}",
+                    provider.name,
+                    provider.priority,
+                    match elected {
+                        Some(name) if name == plugin.name => " — elected",
+                        Some(_) => " — standing down",
+                        None => " — not answering",
+                    }
+                ),
+                "source" => println!(
+                    "  provides: {} ({})",
+                    provider.name,
+                    provider.extensions.join(", ")
+                ),
+                // Reported through problems() as well; named here so the line
+                // it appears on is next to the plugin it came from.
+                other => println!("  provides: {} ({other}, unsupported)", provider.name),
+            }
         }
     }
 

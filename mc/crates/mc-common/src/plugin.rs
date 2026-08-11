@@ -53,20 +53,23 @@ pub const ABI: u32 = 1;
 pub enum Event {
     /// Before the unit is started.
     PreStart,
-    /// Before the server is told to stop. `mc-rcon` runs the player countdown
-    /// here.
+    /// Before the server is told to stop. The elected console runs the player
+    /// countdown here.
     ///
     /// MAY NEVER BE FATAL — see [`HookDecl::fatal`].
     PreStop,
-    /// Before a backup archives the world. `mc-rcon` sends save-off/save-all.
+    /// Before a backup archives the world. The elected console pauses saving
+    /// and flushes.
     PreBackup,
-    /// After a backup, whether or not it succeeded. `mc-rcon` sends save-on.
+    /// After a backup, whether or not it succeeded. The elected console turns
+    /// saving back on.
     ///
     /// Also never fatal: leaving a live server with saves disabled because a
     /// hook reported failure would be worse than the failure.
     PostBackup,
-    /// After a server is installed. `mc-rcon` provisions the password and
-    /// enables RCON here.
+    /// After a server is installed. A console provisions its own credentials
+    /// here — EVERY installed console, not just the elected one, so that
+    /// losing an election does not leave a machine with nothing that works.
     PostInstall,
     /// After a server is upgraded.
     PostUpgrade,
@@ -94,6 +97,22 @@ impl Event {
             Event::PostInstall => "post-install",
             Event::PostUpgrade => "post-upgrade",
         }
+    }
+
+    /// Events where two consoles doing the work would be worse than one doing
+    /// it.
+    ///
+    /// A second countdown announces a shutdown that already has a schedule,
+    /// and a second save-off/save-on pair can turn saving back on halfway
+    /// through another console's archive. Only the elected console runs these
+    /// — see [`Registry::console`].
+    ///
+    /// Provisioning events are deliberately NOT here. Every installed console
+    /// keeps itself configured and ready, so losing one election does not
+    /// leave a machine with no working console the day the winner's probe
+    /// starts failing.
+    pub fn is_console_exclusive(&self) -> bool {
+        matches!(self, Event::PreStop | Event::PreBackup | Event::PostBackup)
     }
 
     /// Events whose failure must never abort the operation around them.
@@ -132,16 +151,31 @@ pub struct HookDecl {
     pub fatal: bool,
 }
 
+/// Provider kinds core knows how to use.
+///
+/// An unknown kind is REPORTED AND IGNORED rather than refused: a plugin built
+/// against a newer core must still contribute the parts this one understands,
+/// or every future kind becomes a flag day for the whole plugin set. The
+/// report is what keeps a typo (`kind = "sauce"`) from being silently inert.
+pub const PROVIDER_KINDS: [&str; 2] = ["source", "console"];
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderDecl {
-    /// Only `source` today: something that can populate a staging directory
-    /// from a file the operator names.
+    /// `source` — populates a staging directory from a file the operator
+    /// names. `console` — talks to the running server.
     pub kind: String,
     pub name: String,
-    /// File extensions this provider claims, without the dot.
+    /// File extensions a `source` provider claims, without the dot.
     #[serde(default)]
     pub extensions: Vec<String>,
+    /// For `console`: which provider wins when more than one is installed.
+    ///
+    /// Higher is better, and the winner must still pass its own probe — see
+    /// [`Registry::console`]. Existing consoles sit at 10, so a new one that
+    /// should take precedence declares 20 rather than renumbering anything.
+    #[serde(default)]
+    pub priority: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -175,15 +209,33 @@ impl Manifest {
                 )));
             }
         }
-        for provider in &self.providers {
-            if provider.kind != "source" {
-                return Err(Error::config(format!(
-                    "plugin '{}' declares unknown provider kind '{}'",
-                    self.name, provider.kind
-                )));
-            }
-        }
         Ok(())
+    }
+
+    /// Provider kinds this core does not implement.
+    ///
+    /// Not an error — see [`PROVIDER_KINDS`]. Discovery turns each of these
+    /// into a reported problem while keeping the plugin's commands, hooks and
+    /// understood providers working.
+    fn unknown_provider_kinds(&self) -> Vec<String> {
+        self.providers
+            .iter()
+            .filter(|p| !PROVIDER_KINDS.contains(&p.kind.as_str()))
+            .map(|p| {
+                format!(
+                    "{}: plugin '{}' declares provider kind '{}', which this mc does not \
+                     implement — that provider is ignored.",
+                    self.source_file.display(),
+                    self.name,
+                    p.kind
+                )
+            })
+            .collect()
+    }
+
+    /// This plugin's console provider, if it declares one.
+    pub fn console_provider(&self) -> Option<&ProviderDecl> {
+        self.providers.iter().find(|p| p.kind == "console")
     }
 }
 
@@ -197,6 +249,12 @@ impl Manifest {
 pub struct Registry {
     plugins: Vec<Manifest>,
     problems: Vec<String>,
+    /// The elected console, resolved at most once per process.
+    ///
+    /// Electing means probing a plugin, which is a fork and exec: a backup
+    /// dispatches two console events and a shutdown one more, and none of them
+    /// should pay for it twice.
+    elected: std::cell::OnceCell<Option<String>>,
 }
 
 impl Registry {
@@ -224,7 +282,10 @@ impl Registry {
 
         for file in files {
             match load_manifest(&file) {
-                Ok(manifest) => registry.plugins.push(manifest),
+                Ok(manifest) => {
+                    registry.problems.extend(manifest.unknown_provider_kinds());
+                    registry.plugins.push(manifest);
+                }
                 Err(e) => registry.problems.push(e.to_string()),
             }
         }
@@ -259,6 +320,36 @@ impl Registry {
             .collect()
     }
 
+    /// The console this machine should use, or `None` if nothing can talk to
+    /// the server.
+    ///
+    /// The highest-priority console whose probe succeeds. The probe is what
+    /// makes the answer depend on the server rather than on what is installed:
+    /// a console for a protocol this server's version does not implement
+    /// reports itself unusable and the next one down takes over, with no
+    /// package conflict and nothing in core naming either of them.
+    pub fn console(&self, paths: &Paths) -> Option<&Manifest> {
+        let name = self.elected.get_or_init(|| self.elect(paths)).as_deref()?;
+        self.plugins.iter().find(|p| p.name == name)
+    }
+
+    fn elect(&self, paths: &Paths) -> Option<String> {
+        let mut candidates: Vec<(&Manifest, i32)> = self
+            .plugins
+            .iter()
+            .filter_map(|p| p.console_provider().map(|c| (p, c.priority)))
+            .collect();
+        // Highest priority first. The sort is stable and discovery is by
+        // filename, so two consoles at the same priority still elect the same
+        // one on every machine.
+        candidates.sort_by_key(|&(_, priority)| std::cmp::Reverse(priority));
+
+        candidates
+            .into_iter()
+            .find(|(plugin, _)| probe(paths, plugin))
+            .map(|(plugin, _)| plugin.name.clone())
+    }
+
     /// The source provider claiming a file extension.
     pub fn source_for_extension(&self, extension: &str) -> Option<(&Manifest, &ProviderDecl)> {
         self.plugins.iter().find_map(|plugin| {
@@ -283,10 +374,25 @@ impl Registry {
     pub fn run_hook(&self, paths: &Paths, event: Event, payload: &serde_json::Value) -> Result<()> {
         let mut fatal_error = None;
 
+        // Resolved only for the events that need it: electing costs a probe
+        // per console, and `post-install` has no reason to pay for one.
+        let elected = event
+            .is_console_exclusive()
+            .then(|| self.console(paths).map(|p| p.name.as_str()))
+            .flatten();
+
         for plugin in &self.plugins {
             let Some(hook) = plugin.hooks.iter().find(|h| h.event == event) else {
                 continue;
             };
+            // A console that lost the election stands down for this event
+            // rather than announcing a second countdown over the winner's.
+            if event.is_console_exclusive()
+                && plugin.console_provider().is_some()
+                && elected != Some(plugin.name.as_str())
+            {
+                continue;
+            }
             match invoke_hook(paths, plugin, event, payload) {
                 Ok(()) => {}
                 Err(e) => {
@@ -353,6 +459,55 @@ fn plugin_env(paths: &Paths) -> Vec<(&'static str, String)> {
         ("MC_CONFIG", paths.config_dir().display().to_string()),
         ("MC_USER", MC_USER.to_string()),
     ]
+}
+
+/// How long a console gets to answer `console probe`.
+///
+/// Bounded because this runs on the shutdown path: a console whose endpoint is
+/// black-holed must cost a couple of seconds, not the unit's whole
+/// `TimeoutStopSec`. Both probes together fit inside the safety buffer that
+/// value already carries.
+pub const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Ask a console whether it can talk to THIS server, right now.
+///
+/// Anything other than a clean exit 0 inside the deadline is "no": a missing
+/// binary, a protocol the server's version does not implement, an endpoint
+/// that is switched off, a hang. The caller then tries the next console down,
+/// so being wrong here costs a fallback rather than a failure.
+fn probe(paths: &Paths, plugin: &Manifest) -> bool {
+    let Ok(mut child) = Command::new(&plugin.bin)
+        .arg("console")
+        .arg("probe")
+        .envs(plugin_env(paths))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+
+    let deadline = std::time::Instant::now() + PROBE_DEADLINE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if std::time::Instant::now() >= deadline {
+            // Reaped as well as killed: an unreaped child of `mc serve` would
+            // sit in the process table for the lifetime of the server.
+            let _ = child.kill();
+            let _ = child.wait();
+            crate::ui::warn(format!(
+                "console '{}' did not answer its probe within {}s; trying the next one",
+                plugin.name,
+                PROBE_DEADLINE.as_secs()
+            ));
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 fn invoke_hook(
@@ -600,16 +755,203 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_provider_kind_is_refused() {
+    fn an_unknown_provider_kind_is_reported_but_costs_the_plugin_nothing_else() {
+        // A plugin built against a newer core keeps working here, minus the
+        // part this core cannot use. Refusing the whole manifest instead would
+        // make every future provider kind a flag day: the operator would lose
+        // the plugin's commands and hooks too, over a provider they were not
+        // relying on yet.
         let (_d, plugins, bin) = plugin_dir();
         write_manifest(
             &plugins,
             "odd",
             &format!(
-                "abi = 1\nname = \"odd\"\nbin = \"{}\"\n[[providers]]\nkind = \"transport\"\nname = \"x\"\n",
+                "abi = 1\nname = \"odd\"\nbin = \"{}\"\n\
+                 [[commands]]\nname = \"odd\"\n\
+                 [[providers]]\nkind = \"transport\"\nname = \"x\"\n",
                 bin.display()
             ),
         );
-        assert_eq!(Registry::discover_in(&plugins).plugins().len(), 0);
+
+        let registry = Registry::discover_in(&plugins);
+        assert_eq!(registry.plugins().len(), 1, "the plugin still loads");
+        assert!(registry.command("odd").is_some(), "its commands still work");
+        assert!(
+            registry.problems().iter().any(|p| p.contains("transport")),
+            "the kind it could not use is named: {:?}",
+            registry.problems()
+        );
+    }
+
+    /// A console fixture: answers `console probe` with `probe_exit`, and logs
+    /// every other invocation so a suppressed hook is visible by its absence.
+    fn console_bin(dir: &Path, name: &str, probe_exit: u8) -> PathBuf {
+        let bin = dir.join(format!("{name}-bin"));
+        let log = dir.join(format!("{name}.log"));
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = console ] && exit {probe_exit}\n\
+                 echo \"$@\" >> {}\n\
+                 exit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        crate::fsx::apply_owner_mode(&bin, None, 0o755).unwrap();
+        bin
+    }
+
+    #[test]
+    fn the_highest_priority_console_that_answers_its_probe_is_elected() {
+        let (_d, plugins, _) = plugin_dir();
+        let paths = Paths::with_root(plugins.parent().unwrap().parent().unwrap());
+
+        for (name, priority, exit) in [("rcon", 10, 0u8), ("mgmt", 20, 0u8)] {
+            let bin = console_bin(&plugins, name, exit);
+            write_manifest(
+                &plugins,
+                name,
+                &format!(
+                    "abi = 1\nname = \"{name}\"\nbin = \"{}\"\n\
+                     [[providers]]\nkind = \"console\"\nname = \"{name}\"\npriority = {priority}\n",
+                    bin.display()
+                ),
+            );
+        }
+
+        let registry = Registry::discover_in(&plugins);
+        assert_eq!(
+            registry.console(&paths).map(|p| p.name.as_str()),
+            Some("mgmt")
+        );
+    }
+
+    #[test]
+    fn a_console_that_cannot_reach_the_server_loses_to_one_that_can() {
+        // The whole point of probing rather than ranking statically: mc-mgmt
+        // outranks mc-rcon, but on a server too old to speak its protocol it
+        // must stand aside rather than leave the machine with no console.
+        let (_d, plugins, _) = plugin_dir();
+        let paths = Paths::with_root(plugins.parent().unwrap().parent().unwrap());
+
+        for (name, priority, exit) in [("rcon", 10, 0u8), ("mgmt", 20, 1u8)] {
+            let bin = console_bin(&plugins, name, exit);
+            write_manifest(
+                &plugins,
+                name,
+                &format!(
+                    "abi = 1\nname = \"{name}\"\nbin = \"{}\"\n\
+                     [[providers]]\nkind = \"console\"\nname = \"{name}\"\npriority = {priority}\n",
+                    bin.display()
+                ),
+            );
+        }
+
+        let registry = Registry::discover_in(&plugins);
+        assert_eq!(
+            registry.console(&paths).map(|p| p.name.as_str()),
+            Some("rcon")
+        );
+    }
+
+    #[test]
+    fn only_the_elected_console_runs_a_console_exclusive_hook() {
+        // The property the whole election exists for: with two consoles
+        // installed, players are warned once. Twice would be worse than not at
+        // all — the second countdown contradicts the first.
+        let (_d, plugins, _) = plugin_dir();
+        let paths = Paths::with_root(plugins.parent().unwrap().parent().unwrap());
+
+        for (name, priority) in [("rcon", 10), ("mgmt", 20)] {
+            let bin = console_bin(&plugins, name, 0);
+            write_manifest(
+                &plugins,
+                name,
+                &format!(
+                    "abi = 1\nname = \"{name}\"\nbin = \"{}\"\n\
+                     [[hooks]]\nevent = \"pre-stop\"\n\
+                     [[hooks]]\nevent = \"post-install\"\n\
+                     [[providers]]\nkind = \"console\"\nname = \"{name}\"\npriority = {priority}\n",
+                    bin.display()
+                ),
+            );
+        }
+
+        let registry = Registry::discover_in(&plugins);
+        registry
+            .run_hook(&paths, Event::PreStop, &serde_json::json!({}))
+            .unwrap();
+
+        let log = |name: &str| {
+            std::fs::read_to_string(plugins.join(format!("{name}.log"))).unwrap_or_default()
+        };
+        assert!(log("mgmt").contains("hook pre-stop"), "the winner acts");
+        assert!(
+            !log("rcon").contains("hook pre-stop"),
+            "the loser stands down: {}",
+            log("rcon")
+        );
+
+        // But provisioning is not exclusive: both consoles keep themselves
+        // ready, so the day mgmt's probe starts failing rcon still works.
+        registry
+            .run_hook(&paths, Event::PostInstall, &serde_json::json!({}))
+            .unwrap();
+        assert!(log("rcon").contains("hook post-install"));
+        assert!(log("mgmt").contains("hook post-install"));
+    }
+
+    #[test]
+    fn a_plugin_that_is_not_a_console_is_never_suppressed() {
+        // mc-backup declares no console provider, so the election has nothing
+        // to say about it — its hooks run regardless of who won.
+        let (_d, plugins, bin) = plugin_dir();
+        let paths = Paths::with_root(plugins.parent().unwrap().parent().unwrap());
+
+        let console = console_bin(&plugins, "mgmt", 0);
+        write_manifest(
+            &plugins,
+            "mgmt",
+            &format!(
+                "abi = 1\nname = \"mgmt\"\nbin = \"{}\"\n\
+                 [[providers]]\nkind = \"console\"\nname = \"mgmt\"\npriority = 20\n",
+                console.display()
+            ),
+        );
+        write_manifest(
+            &plugins,
+            "other",
+            &format!(
+                "abi = 1\nname = \"other\"\nbin = \"{}\"\n[[hooks]]\nevent = \"pre-backup\"\n",
+                bin.display()
+            ),
+        );
+
+        Registry::discover_in(&plugins)
+            .run_hook(&paths, Event::PreBackup, &serde_json::json!({}))
+            .unwrap();
+    }
+
+    #[test]
+    fn no_console_answers_and_nothing_is_elected() {
+        let (_d, plugins, _) = plugin_dir();
+        let paths = Paths::with_root(plugins.parent().unwrap().parent().unwrap());
+
+        let bin = console_bin(&plugins, "rcon", 1);
+        write_manifest(
+            &plugins,
+            "rcon",
+            &format!(
+                "abi = 1\nname = \"rcon\"\nbin = \"{}\"\n\
+                 [[providers]]\nkind = \"console\"\nname = \"rcon\"\npriority = 10\n",
+                bin.display()
+            ),
+        );
+
+        // Not an error: a server with no console still stops, backs up and
+        // installs — it just does so without warning players first.
+        assert!(Registry::discover_in(&plugins).console(&paths).is_none());
     }
 }

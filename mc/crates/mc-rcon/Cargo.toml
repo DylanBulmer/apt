@@ -20,6 +20,7 @@ path = "src/bin/rcon.rs"
 
 [dependencies]
 mc-common = { workspace = true }
+mc-console = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
