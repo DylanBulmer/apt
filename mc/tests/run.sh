@@ -54,11 +54,15 @@ echo "==> building images"
 docker build -q -t "$BUILD_IMAGE" -f "$HERE/Dockerfile.build" "$HERE" >/dev/null
 docker build -q -t "$TEST_IMAGE"                              "$HERE" >/dev/null
 
-# Build the four .debs ONCE and share them with every container.
+# Build the .debs ONCE and share them with every container.
 #
 # The cargo registry and target dir are cached in named volumes: without them
 # every run recompiles the whole dependency graph, which dominates the runtime
 # of the suite far more than any test does.
+#
+# A single workspace build compiles all binaries at once. --release has no
+# incremental compilation, so building 5 packages separately means 5 full
+# compilations. build.sh skips the cargo invocation when binaries exist.
 echo "==> building packages"
 docker run --rm \
     -v "$ROOT":/src:ro \
@@ -69,6 +73,8 @@ docker run --rm \
         set -e
         cp -a /src/. /build/
         rm -rf /build/dist /build/staging
+        echo "  compiling workspace..."
+        cargo build --release --locked --workspace
         for pkg in mc-server mc-rcon mc-backup mc-mrpack mc-mgmt; do
             bash scripts/build.sh "$pkg" >/dev/null
         done
@@ -118,8 +124,32 @@ run_suite() { # run_suite <relative path under tests/suites, no .sh>
 if [[ ${#SUITES[@]} -gt 0 ]]; then
     for s in "${SUITES[@]}"; do run_suite "$s"; done
 elif [[ "$RUN_INTEGRATION" == yes ]]; then
+    # Run all integration suites in parallel — each is an independent container
+    # with no shared state, so they scale across CPUs.
+    printf '\n==> integration suites (parallel)\n'
+    mkdir -p "$WORK/results"
     for f in "$HERE"/suites/integration/*.sh; do
-        run_suite "integration/$(basename "$f" .sh)"
+        name="integration/$(basename "$f" .sh)"
+        base="${name##*/}"
+        printf '    %s\n' "$name"
+        docker run --rm \
+            -v "$ROOT":/work:ro \
+            -v "$WORK/dist":/dist:ro \
+            -v "$WORK/results":/res \
+            -e MC_REPO=/work \
+            "$TEST_IMAGE" \
+            bash -c "bash /work/tests/suites/${name}.sh 2>&1 | tee /res/${base}.txt; echo \$? > /res/${base}.exit" &
+    done
+    wait
+    for f in "$HERE"/suites/integration/*.sh; do
+        name="integration/$(basename "$f" .sh)"
+        base="${name##*/}"
+        exit_code=$(cat "$WORK/results/${base}.exit")
+        if [[ "$exit_code" != "0" ]]; then
+            FAILED+=("$name")
+            printf '\n==> %s FAILED\n' "$name"
+            cat "$WORK/results/${base}.txt"
+        fi
     done
 fi
 
