@@ -1,0 +1,17 @@
+# Builder for the .deb files.
+#
+# rust:1-trixie, NOT the host toolchain and NOT a musl target: the binaries must
+# link against the same glibc as the Debian 13 they install onto. A binary built
+# on a newer glibc references symbol versions the target does not have, and the
+# failure is `version GLIBC_2.xx not found` at exec time — after a successful
+# build, a successful package, and a successful install.
+FROM rust:1-trixie
+
+#   dpkg-dev         dpkg-deb, dpkg-shlibdeps
+#   build-essential  the linker cargo invokes
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends \
+      dpkg-dev build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build

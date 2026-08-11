@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop    minecraft-backup.timer 2>/dev/null || true
+            systemctl disable minecraft-backup.timer 2>/dev/null || true
+            systemctl daemon-reload                  2>/dev/null || true
+        fi
+        # /var/backups/minecraft is deliberately left alone: the archives are
+        # the operator's data, not this package's.
+        ;;
+esac
+
+exit 0

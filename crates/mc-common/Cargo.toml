@@ -1,0 +1,38 @@
+[package]
+name = "mc-common"
+description = "Shared library for the mc Minecraft server management framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Every crate in this workspace links this one statically. That is what lets a
+# plugin reuse the real properties engine, path-safety checks and hash
+# verification instead of reimplementing them, WITHOUT taking on a runtime ABI
+# dependency on the core binary's build — the plugin contract is the manifest
+# and the process boundary, not this crate.
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = "2"
+# `nix` rather than raw `libc` because the workspace denies unsafe_code: chown,
+# getpwnam and the O_EXCL lock all need syscalls, and these are the safe
+# wrappers around them.
+nix = { version = "0.30", features = ["user", "fs", "signal"] }
+# Not dev-only: every rewrite of server.properties goes through a same-directory
+# temp file so the JVM can never read a half-written config.
+tempfile = { workspace = true }
+sha1 = "0.10"
+sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "json"] }
+serde_json = "1"
+
+[lints]
+workspace = true
+
+[features]
+# Exposes the scripted FakeHttp / FakeService to other crates' tests. Not
+# enabled by default: nothing in a shipped .deb should be able to reach them.
+testkit = []

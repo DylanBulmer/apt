@@ -1,0 +1,12 @@
+# mc plugin manifest — see the plugin-development skill for the contract.
+abi  = 1
+name = "mrpack"
+bin  = "/usr/libexec/mc/mc-mrpack"
+
+# Claims the .mrpack extension, so `mc install pack.mrpack` routes here. Core
+# keeps the lock, the EULA gate, ownership of MC_BASE and the managed keys of
+# server.properties; this provider only fetches and stages.
+[[providers]]
+kind       = "source"
+name       = "mrpack"
+extensions = ["mrpack"]

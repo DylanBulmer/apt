@@ -1,12 +1,19 @@
 Package: mc-rcon
-Version: 0.4.7
+Version: 1.0.0
 Architecture: any
 Maintainer: Dylan Bulmer <dylan@bulmer.dev>
-Depends: mc-server (>= 0.8.0)
+Depends: mc-server, ${shlibs:Depends}
 Section: admin
 Priority: optional
 Homepage: https://apt.bulmer.dev
-Description: RCON subcommand plugin for mc-server
- mc-rcon adds the 'mc rcon' subcommand to the mc CLI, providing interactive
- RCON console access and single-command execution against a running Minecraft
- server. Implemented in C with no runtime dependencies beyond mc-server.
+Description: RCON console plugin for mc-server
+ Adds the 'mc rcon' subcommand — an interactive console, or a single command
+ against a running server — and the lifecycle hooks that make a shutdown
+ graceful and a backup consistent: it warns players and counts them down before
+ a stop, and flushes the world around a backup.
+ .
+ Also ships /usr/bin/rcon, a standalone client that reads its password from a
+ file so the secret never appears in argv.
+ .
+ The plugin declares mc's ABI version in its manifest, so an incompatible pair
+ of packages is refused by name rather than failing at run time.

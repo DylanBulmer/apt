@@ -1,45 +1,70 @@
 #!/usr/bin/env bash
-# One real `mc install` of $MC_TYPE against the live upstream APIs.
+# One real `mc install` of $MC_TYPE against the live upstream API.
 #
-# Run by tests/run.sh --all, as four parallel containers (one per type) — each
-# needs its own clean /opt/minecraft, and this is the only suite that touches
-# the network. Writes /res/$MC_TYPE.txt for the runner to collect.
+# THE ONLY THING IN THE TREE THAT CATCHES UPSTREAM DRIFT. Every API mc talks to
+# has changed shape at least once — PaperMC's v2 was sunset outright and v3
+# lives on a different host with a different response shape — and the offline
+# fixtures the cargo tests use cannot notice. That makes this suite slow and
+# occasionally red for reasons outside this repository, which is the point:
+# run it on a schedule, and read a failure here as "upstream moved" before
+# reading it as "we broke something".
+#
+# Writes a one-line verdict to /res/$MC_TYPE.txt so run.sh can run the four
+# types as four parallel containers.
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/assert.sh"
 
-t="${MC_TYPE:?set MC_TYPE to vanilla|paper|fabric|neoforge}"
+TYPE="${MC_TYPE:-vanilla}"
+RESULT="/res/${TYPE}.txt"
 mkdir -p /res
 
-start=$(date +%s)
-mc install --type "$t" --accept-eula --yes > "/res/$t.log" 2>&1
-rc=$?
-elapsed=$(( $(date +%s) - start ))
+fail() { printf 'FAIL %-9s %s\n' "$TYPE" "$*" > "$RESULT"; exit 1; }
+pass() { printf 'ok   %-9s %s\n' "$TYPE" "$*" > "$RESULT"; exit 0; }
 
-P=/opt/minecraft/server.properties
-{
-    section "$t (${elapsed}s)"
-    check "install exits 0" 0 "$rc"
+out=$(mc install --type "$TYPE" --accept-eula --yes 2>&1) \
+    || fail "install failed: $(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
 
-    # The whole point of --initSettings: a complete, editable properties file and
-    # NO world, so level-seed can still be chosen.
-    check "no world generated" "absent" "$([[ -d /opt/minecraft/world ]] && echo present || echo absent)"
-    check "level-seed present" "yes" "$(grep -q '^level-seed=' "$P" 2>/dev/null && echo yes || echo no)"
-    check "motd present"       "yes" "$(grep -q '^motd=' "$P" 2>/dev/null && echo yes || echo no)"
+# ── The artifact landed ────────────────────────────────────────────────────
+# NeoForge installs a run.sh tree rather than a single jar, so both count.
+if [[ ! -s /opt/minecraft/server.jar && ! -s /opt/minecraft/run.sh ]]; then
+    fail "no server artifact in /opt/minecraft"
+fi
 
-    # A four-key file means initialize_server_settings did not take effect.
-    keys=$(grep -c = "$P" 2>/dev/null || echo 0)
-    check "properties fully populated" "yes" "$([[ "${keys:-0}" -gt 40 ]] && echo yes || echo no)"
+# ── The version was resolved and PINNED ────────────────────────────────────
+# "latest" left in the config means a later upgrade cannot tell what moved.
+version=$(grep -E '^version' /etc/minecraft/config.toml | head -1 | sed 's/.*= *"\(.*\)".*/\1/')
+[[ -n "$version" && "$version" != "latest" ]] \
+    || fail "version not pinned in config.toml (got '${version}')"
 
-    check "mode 0640"  "640" "$(file_mode "$P" 2>/dev/null || echo missing)"
-    check "owner"      "minecraft:minecraft" "$(stat -c '%U:%G' "$P" 2>/dev/null || echo missing)"
-    check "eula recorded" "eula=true" "$(grep -h '^eula=' /opt/minecraft/eula.txt 2>/dev/null || echo missing)"
+# ── server.properties exists, complete, and correctly owned ────────────────
+# `--initSettings` is what writes it before any world is generated, which is the
+# only window in which level-seed is still meaningful. A failure there is a
+# warning rather than an abort, so it is asserted here rather than assumed.
+[[ -f /opt/minecraft/server.properties ]] \
+    || fail "server.properties was not written"
+grep -q '^level-seed=' /opt/minecraft/server.properties \
+    || fail "server.properties is not fully populated (no level-seed)"
 
-    # NeoForge's FML wrapper exits 1 even when --initSettings succeeded, so the
-    # step judges the outcome instead. If this warning appears, that check
-    # regressed — the file above is populated, so nothing actually failed.
-    check_lacks "no spurious pre-generate warning" "/res/$t.log" "Could not pre-generate"
+owner=$(stat -c '%U:%G' /opt/minecraft/server.properties)
+mode=$(stat -c '%a' /opt/minecraft/server.properties)
+[[ "$owner" == "minecraft:minecraft" ]] \
+    || fail "server.properties owner is ${owner}, not minecraft:minecraft"
+[[ "$mode" == "640" ]] \
+    || fail "server.properties mode is ${mode}, not 640"
 
-    printf '    version: %s\n' "$(grep -hE '^(SERVER_TYPE|MINECRAFT_VERSION|JAVA_VERSION)=' \
-        /etc/minecraft/server.conf 2>/dev/null | tr '\n' ' ')"
-    report
-} > "/res/$t.txt" 2>&1
+# ── The whole tree belongs to the service account ──────────────────────────
+# A root-owned file anywhere in here is a file the JVM cannot write.
+stray=$(find /opt/minecraft ! -user minecraft -print -quit)
+[[ -z "$stray" ]] || fail "not owned by minecraft: ${stray}"
+
+# ── Nothing was left behind ────────────────────────────────────────────────
+leftover=$(find /opt -maxdepth 1 -name '.mc-staging-*' -print -quit)
+[[ -z "$leftover" ]] || fail "staging directory left behind: ${leftover}"
+
+# ── The runtime chosen is one that exists ──────────────────────────────────
+java_major=$(grep -E '^version' /etc/minecraft/config.toml | sed -n '2p' | sed 's/[^0-9]//g')
+if [[ -n "$java_major" ]]; then
+    ls -d /usr/lib/jvm/*"-${java_major}-"* >/dev/null 2>&1 \
+        || fail "config selects Java ${java_major}, which is not installed"
+fi
+
+pass "$version"

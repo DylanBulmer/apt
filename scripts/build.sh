@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Build a .deb from packages/<name>/
+# Build one .deb from packages/<name>/ plus the binaries its crate produces.
 #
-# Packages with a src/ directory are compiled first; the binary is installed
-# into a temporary staging directory before dpkg-deb runs, keeping the source
-# tree clean.
+# packages/<name>/ mirrors the target filesystem root and holds everything that
+# is NOT compiled — maintainer scripts, units, conffiles, plugin manifests. The
+# binaries come from the cargo workspace and are copied into a staging tree, so
+# the source tree stays clean and `packages/` stays readable as "what lands on
+# disk".
 set -euo pipefail
 
 PACKAGE="${1:-}"
@@ -16,71 +18,89 @@ STAGING_DIR="$ROOT/staging/$PACKAGE"
 
 [[ -d "$PKG_DIR" ]] || { echo "Package directory not found: $PKG_DIR"; exit 1; }
 
-VERSION=$(grep '^Version:'      "$PKG_DIR/DEBIAN/control" | awk '{print $2}')
-ARCH=$(   grep '^Architecture:' "$PKG_DIR/DEBIAN/control" | awk '{print $2}')
+VERSION=$(grep '^Version:' "$PKG_DIR/DEBIAN/control" | awk '{print $2}')
+ARCH=$(dpkg --print-architecture)
+OUTPUT="${DIST_DIR}/${PACKAGE}_${VERSION}_${ARCH}.deb"
 mkdir -p "$DIST_DIR"
 
-if [[ -d "$PKG_DIR/src" ]]; then
-    # ── Compiled package ───────────────────────────────────────────────────
-    # Detect the build machine's architecture and use it for the output name,
-    # regardless of what the control file says (it may say 'amd64' as a default).
-    ARCH=$(dpkg --print-architecture)
-    OUTPUT="${DIST_DIR}/${PACKAGE}_${VERSION}_${ARCH}.deb"
+# ── Which binaries this package ships, and where they install ──────────────
+#
+# THE SOURCE NAMES MUST MATCH THE [[bin]] ENTRIES in the crates' Cargo.toml.
+# A rename on one side and not the other produces a .deb with a missing
+# executable and a build that still reports success — so the copy below fails
+# loudly instead of skipping.
+declare -a BINARIES=()
+case "$PACKAGE" in
+    mc-server)  BINARIES=("mc:usr/bin/mc") ;;
+    mc-rcon)    BINARIES=("mc-rcon:usr/libexec/mc/mc-rcon" "rcon:usr/bin/rcon") ;;
+    mc-backup)  BINARIES=("mc-backup:usr/libexec/mc/mc-backup") ;;
+    mc-mrpack)  BINARIES=("mc-mrpack:usr/libexec/mc/mc-mrpack") ;;
+    *)          echo "Unknown package: $PACKAGE" >&2; exit 1 ;;
+esac
 
-    echo "Compiling $PACKAGE..."
-    make -C "$PKG_DIR/src" clean
-    make -C "$PKG_DIR/src"
+echo "Compiling $PACKAGE..."
+# --locked so a build never silently resolves a different dependency graph than
+# the one Cargo.lock records and CI tested.
+( cd "$ROOT" && cargo build --release --locked $(printf -- '--bin %s ' "${BINARIES[@]%%:*}") )
 
-    # Build staging tree: copy non-src package files, install compiled binary
-    rm -rf "$STAGING_DIR"
-    mkdir -p "$STAGING_DIR"
-    rsync -a --exclude=src/ "$PKG_DIR/" "$STAGING_DIR/"
+rm -rf "$STAGING_DIR"
+mkdir -p "$STAGING_DIR"
+cp -a "$PKG_DIR/." "$STAGING_DIR/"
 
-    # Patch Architecture in staging control to match actual build arch
-    sed -i "s/^Architecture:.*/Architecture: ${ARCH}/" "$STAGING_DIR/DEBIAN/control"
+for spec in "${BINARIES[@]}"; do
+    src="$ROOT/target/release/${spec%%:*}"
+    dst="$STAGING_DIR/${spec#*:}"
+    [[ -f "$src" ]] || { echo "Built binary missing: $src" >&2; exit 1; }
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst"
+done
 
-    make -C "$PKG_DIR/src" install DESTDIR="$STAGING_DIR"
-
-    BUILD_DIR="$STAGING_DIR"
-else
-    # ── Script/data package ────────────────────────────────────────────────
-    # 'any' is only meaningful for packages built from source; without a src/
-    # dir there is nothing to compile, so resolve it to the build machine's
-    # architecture rather than emitting a bogus '_any.deb'.
-    if [[ "$ARCH" == "any" ]]; then
-        ARCH=$(dpkg --print-architecture)
-        echo "Warning: $PACKAGE declares 'Architecture: any' but has no src/;" \
-             "using build host architecture '${ARCH}'." >&2
+# ── Dependencies ───────────────────────────────────────────────────────────
+#
+# ${shlibs:Depends} is a debhelper substitution variable, and nothing
+# substitutes it under plain dpkg-deb — it would be shipped literally, and apt
+# would refuse the package. Resolve it here from the binaries actually built,
+# so the floor matches the glibc they were linked against rather than a guess.
+if grep -q '${shlibs:Depends}' "$STAGING_DIR/DEBIAN/control"; then
+    SHLIB_DEPS=""
+    if command -v dpkg-shlibdeps >/dev/null 2>&1; then
+        BIN_PATHS=()
+        for spec in "${BINARIES[@]}"; do BIN_PATHS+=("$STAGING_DIR/${spec#*:}"); done
+        # dpkg-shlibdeps expects a debian/ directory to write into.
+        mkdir -p "$STAGING_DIR/debian"
+        : > "$STAGING_DIR/debian/control"
+        if ( cd "$STAGING_DIR" && dpkg-shlibdeps -O --ignore-missing-info "${BIN_PATHS[@]}" 2>/dev/null ) \
+                > "$STAGING_DIR/.shlibdeps"; then
+            SHLIB_DEPS=$(sed 's/^shlibs:Depends=//' "$STAGING_DIR/.shlibdeps")
+        fi
+        rm -rf "$STAGING_DIR/debian" "$STAGING_DIR/.shlibdeps"
     fi
-    OUTPUT="${DIST_DIR}/${PACKAGE}_${VERSION}_${ARCH}.deb"
-    BUILD_DIR="$PKG_DIR"
+    # A Rust binary against Debian's glibc needs libc6 and nothing else; TLS is
+    # rustls, so there is no OpenSSL to depend on. Falling back to the bare name
+    # is honest when dpkg-shlibdeps is unavailable (building on a non-Debian
+    # host), rather than shipping an unsubstituted placeholder.
+    SHLIB_DEPS="${SHLIB_DEPS:-libc6}"
+    sed -i.bak "s/\${shlibs:Depends}/${SHLIB_DEPS}/" "$STAGING_DIR/DEBIAN/control"
+    rm -f "$STAGING_DIR/DEBIAN/control.bak"
 fi
 
-# Fix permissions required by dpkg-deb
-chmod 755 "$BUILD_DIR/DEBIAN"
-for f in postinst prerm postrm preinst; do
-    [[ -f "$BUILD_DIR/DEBIAN/$f" ]] && chmod 755 "$BUILD_DIR/DEBIAN/$f"
+sed -i.bak "s/^Architecture:.*/Architecture: ${ARCH}/" "$STAGING_DIR/DEBIAN/control"
+rm -f "$STAGING_DIR/DEBIAN/control.bak"
+
+# ── Permissions ────────────────────────────────────────────────────────────
+chmod 755 "$STAGING_DIR/DEBIAN"
+for f in preinst postinst prerm postrm; do
+    [[ -f "$STAGING_DIR/DEBIAN/$f" ]] && chmod 755 "$STAGING_DIR/DEBIAN/$f"
 done
 
-find "$BUILD_DIR/usr/bin"   -type f              -exec chmod 755 {} \; 2>/dev/null || true
+# Executables. Everything else installs 0644 root:root — plugin manifests and
+# unit files are read by root and must not be writable by anyone else.
+find "$STAGING_DIR/usr/bin"     -type f -exec chmod 755 {} \; 2>/dev/null || true
+find "$STAGING_DIR/usr/libexec" -type f -exec chmod 755 {} \; 2>/dev/null || true
+find "$STAGING_DIR/etc"         -type f -exec chmod 644 {} \; 2>/dev/null || true
+find "$STAGING_DIR/lib/systemd" -type f -exec chmod 644 {} \; 2>/dev/null || true
+find "$STAGING_DIR/usr/lib"     -type f -exec chmod 644 {} \; 2>/dev/null || true
+find "$STAGING_DIR/usr/share"   -type f -exec chmod 644 {} \; 2>/dev/null || true
 
-# Shell files under /usr/lib default to 644: most are *sourced*, not executed
-# (lib.sh, common.sh, commands.d/*.sh). They install root:root, and root sources
-# and runs them as root, so they must not be writable by anyone but root — and
-# they need no execute bit to be sourced. Only the scripts systemd actually
-# invokes are made executable, individually, below.
-find "$BUILD_DIR/usr/lib"   -type f -name '*.sh' -exec chmod 644 {} \; 2>/dev/null || true
-find "$BUILD_DIR/usr/lib"   -type f -name '*.py' -exec chmod 644 {} \; 2>/dev/null || true
-
-# Exec targets of minecraft.service (ExecStart=/ExecStop=/ExecReload=).
-for _exec in start.sh stop.sh reload.sh; do
-    [[ -f "$BUILD_DIR/usr/lib/mc/$_exec" ]] && chmod 755 "$BUILD_DIR/usr/lib/mc/$_exec"
-done
-
-find "$BUILD_DIR/lib/systemd" -type f            -exec chmod 644 {} \; 2>/dev/null || true
-find "$BUILD_DIR/usr/share"   -type f            -exec chmod 644 {} \; 2>/dev/null || true
-find "$BUILD_DIR/etc"         -type f            -exec chmod 644 {} \; 2>/dev/null || true
-
-dpkg-deb --build --root-owner-group "$BUILD_DIR" "$OUTPUT"
-
+dpkg-deb --build --root-owner-group "$STAGING_DIR" "$OUTPUT"
 echo "Built: $OUTPUT"

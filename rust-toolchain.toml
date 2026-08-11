@@ -1,0 +1,7 @@
+# Pinned so a local build, CI, and the Debian builder image all compile with the
+# same rustc. Without this the `rust:1-trixie` image used to link against the
+# target glibc floats to whatever 1.x it was last rebuilt with, and a lint that
+# is a warning here becomes `-D warnings` there.
+[toolchain]
+channel = "1.97"
+components = ["rustfmt", "clippy"]

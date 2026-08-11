@@ -5,30 +5,29 @@
 APT packages by Dylan Bulmer, hosted at
 [apt.bulmer.dev](https://apt.bulmer.dev).
 
+**`mc`** is a plugin-first Minecraft server manager for bare-metal Debian.
+The core package installs, upgrades and runs a server; everything else —
+console access, backups, modpacks — is another `.deb`.
+
 ## Contents
 
 - [Requirements](#requirements)
 - [Adding the repository](#adding-the-repository)
-  - [Verifying the signing key](#verifying-the-signing-key)
 - [Quick start](#quick-start)
 - [Packages](#packages)
-  - [`mc-server`](#mc-server)
-    - [Choosing the world before it exists](#choosing-the-world-before-it-exists)
-    - [Repeat runs](#repeat-runs)
-    - [Configuration](#configuration)
-    - [Backups](#backups)
-    - [Modpacks](#modpacks)
-  - [`mc-rcon`](#mc-rcon)
+- [Commands](#commands)
+- [Configuration](#configuration)
+- [Plugins](#plugins)
+  - [`mc-rcon` — console and graceful shutdown](#mc-rcon--console-and-graceful-shutdown)
+  - [`mc-backup` — backups and restores](#mc-backup--backups-and-restores)
+  - [`mc-mrpack` — Modrinth modpacks](#mc-mrpack--modrinth-modpacks)
+  - [Writing your own](#writing-your-own)
 - [File locations](#file-locations)
+- [Docker](#docker)
 - [Uninstalling](#uninstalling)
 - [Troubleshooting](#troubleshooting)
 - [Security](#security)
 - [Development](#development)
-  - [Building packages](#building-packages)
-  - [Running the tests](#running-the-tests)
-  - [Adding a package](#adding-a-package)
-  - [Publishing to the repo](#publishing-to-the-repo)
-  - [CI/CD](#cicd)
 - [License](#license)
 
 ## Requirements
@@ -36,7 +35,7 @@ APT packages by Dylan Bulmer, hosted at
 - Debian or Ubuntu with `systemd`
 - `amd64` or `arm64` — the repository publishes no other architectures
 - Java is **not** a prerequisite. `mc install` picks the right major version
-  (8, 17, 21, or 25) for the Minecraft version you asked for, and installs
+  (8, 17, 21 or 25) for the Minecraft version you asked for, and installs
   `openjdk-<N>-jre-headless` for you when run with `--yes`
 
 ## Adding the repository
@@ -73,15 +72,15 @@ If the fingerprint does not match, stop and remove the keyring file.
 ## Quick start
 
 ```bash
-sudo apt install mc-server mc-rcon   # mc-rcon is optional
-sudo mc install --type paper         # prompts for the EULA, then downloads
+sudo apt install mc-server                  # pulls in the recommended plugins
+sudo mc install --type paper                # prompts for the EULA, then downloads
 sudoedit /opt/minecraft/server.properties   # optional: level-seed, motd, difficulty
-sudo mc start
+sudo systemctl enable --now minecraft
 mc status
 ```
 
-Then open port `25565` to your players and **not** port `25575` — see
-[`mc-rcon`](#mc-rcon) below.
+Open port `25565` to your players and **not** port `25575` — see
+[`mc-rcon`](#mc-rcon--console-and-graceful-shutdown).
 
 > [!IMPORTANT]
 > `mc install` will not set up a server until you accept the
@@ -89,469 +88,342 @@ Then open port `25565` to your players and **not** port `25575` — see
 > anything; pass `--accept-eula` to accept it up front. Acceptance is recorded
 > in `/opt/minecraft/eula.txt`, and the server refuses to start without it.
 
+### Choosing the world before it exists
+
+`mc install` writes a **complete** `server.properties` without generating a
+world, so `level-seed`, `motd`, `difficulty` and the rest can be set before the
+first start. The seed is consumed when the world is created and has no effect
+afterwards — edit the file before `systemctl enable --now minecraft`.
+
 ## Packages
 
-### `mc-server`
+| Package | What it adds |
+|---|---|
+| **`mc-server`** | the `mc` command, the systemd unit, install/upgrade/lifecycle. Everything below is optional. |
+| `mc-rcon` | `mc rcon`, the in-game shutdown countdown, world flushing around backups, `/usr/bin/rcon` |
+| `mc-backup` | `mc backup`, `mc restore`, and the scheduled backup timer |
+| `mc-mrpack` | `mc install pack.mrpack` — Modrinth modpacks |
 
-Manages a Minecraft server instance on bare-metal or inside VMs/LXC containers.
-Supports Paper, Vanilla, Fabric, and NeoForge server types with systemd-based
-lifecycle management, automated backups, and multi-version Java support.
+`mc-server` *Recommends* all three, so a plain `apt install mc-server` gives you
+everything. Install only what you want with `--no-install-recommends`, and add
+or remove a plugin at any time:
 
 ```bash
-sudo apt install mc-server
+sudo apt install --no-install-recommends mc-server   # core alone
+sudo apt install mc-backup                           # add backups later
+sudo apt remove mc-mrpack                            # drop modpack support
+mc plugins                                           # what is installed, and what it adds
 ```
 
-**Commands**
+Removing a plugin withdraws its commands and leaves core working. A command
+that needs a plugin you do not have says which package provides it.
+
+## Commands
 
 ```
-mc install [--type TYPE] [--version VER]   Install the server jar
-mc install <pack.mrpack>                   Install from a Modrinth modpack
-mc upgrade [--version VER]                 Upgrade to a newer version
-mc upgrade <new.mrpack>                    Upgrade from a new Modrinth modpack
-mc start [--accept-eula]                   Start the server
-mc stop                                    Stop the server gracefully
-mc restart [--accept-eula]                 Restart the server
-mc status                                  Show systemd service status
-mc backup                                  Create a timestamped backup
-mc restore <file>                          Restore from a backup archive
-mc logs                                    Follow the server log
+mc install [--type TYPE] [--version VER]   Install the server
+mc install <pack.mrpack>                   Install from a Modrinth modpack  (mc-mrpack)
+mc upgrade [--version VER]                 Upgrade to the newest version
+mc upgrade <new.mrpack>                    Upgrade from a new modpack       (mc-mrpack)
 mc delete                                  Permanently remove the server
+
+mc start [--accept-eula]                   Start the server
+mc stop                                    Stop it (with a countdown, if mc-rcon)
+mc restart [--accept-eula]                 Restart it
+mc status                                  Service state
+mc logs                                    Follow the server log
+mc plugins                                 List installed plugins
+
+mc backup                                  Create a timestamped backup      (mc-backup)
+mc restore <file>                          Restore from an archive          (mc-backup)
+mc rcon [command]                          Console, or one command          (mc-rcon)
+mc rcon enable | disable | status          Manage RCON                      (mc-rcon)
 ```
 
-Server types: `vanilla` (default), `paper`, `fabric`, `neoforge`.
+**Flags**
 
-**Privileges.** `mc status` and `mc logs` need no root at all (`logs` needs the
-usual journal access — the `adm` or `systemd-journal` group). Everything else
-writes to `/opt/minecraft` or root-only `/var/backups/minecraft`, or drives
-systemd, so it genuinely needs root.
+| Flag | Consents to | Commands |
+|---|---|---|
+| `--accept-eula` | the [Minecraft EULA](https://www.minecraft.net/eula) | `install`, `upgrade`, `start`, `restart` |
+| `--yes` / `-y` | installing a missing `openjdk-<N>-jre-headless` | `install`, `upgrade` |
+| `--force` | reinstalling over an existing server, or at the same version | `install`, `upgrade` |
+| `--no-backup` | upgrading with no pre-upgrade backup | `upgrade` |
 
-You do not have to remember which is which. Run any of them without `sudo` at a
-terminal and `mc` re-runs itself under `sudo` for you:
-
-```
-$ mc backup
-[mc] This needs root — re-running under sudo.
-[sudo] password for alice:
-[mc] Creating backup: /var/backups/minecraft/minecraft-20260810-142233.tar.gz
-```
-
-This grants nothing: `sudo` applies its own policy, so a user who is not in
-`sudoers` gets `sudo`'s refusal. Where there is no terminal to answer a prompt —
-the backup timer, a hook, a CI runner — `mc` refuses outright with the command
-to run instead, rather than blocking on a password nobody can type. Without
-`sudo` installed it does the same, so `doas` and `run0` users are unaffected.
-
-`mc` takes two consent flags, both of which it otherwise asks about
-interactively:
-
-| Flag | Consents to | Accepted by |
-| --- | --- | --- |
-| `--accept-eula` | The [Minecraft EULA](https://www.minecraft.net/eula) | `install`, `upgrade`, `start`, `restart` |
-| `--yes` / `-y` | Installing a missing `openjdk-<N>-jre-headless` | `install`, `upgrade` |
-
-They are deliberately separate — asking for a JRE is not the same as accepting a
-licence. An unattended install (cloud-init, Ansible, Docker) needs both, since
-without them `mc` has no terminal to ask at and fails rather than assuming:
+The two consent flags are deliberately separate: `--yes` agrees to install a
+package, `--accept-eula` agrees to a licence. Both are needed for a fully
+unattended install (cloud-init, Ansible, Docker):
 
 ```bash
 sudo mc install --type paper --accept-eula --yes
 ```
 
-Everything except `status` and `logs` requires root. Tab completion for
-subcommands and flags is installed automatically; install the `bash-completion`
-package if it is not already present.
-
-The server runs as the `minecraft` system user under `systemd`. RCON is
-**disabled by default**; install `mc-rcon` to enable it automatically.
-
-#### Choosing the world before it exists
-
-`mc install` leaves you a complete `/opt/minecraft/server.properties` — every
-setting at its default — **without generating the world**. Nothing is created
-until you start the server, so this is the window in which to pick a seed:
+`mc` re-runs itself under `sudo` when you forget it and there is a terminal to
+prompt on. Read-only commands (`status`, `logs`, `plugins`, `mc rcon status`)
+need no root at all if you are in the `minecraft` group:
 
 ```bash
-sudo mc install --type paper --accept-eula --yes
-sudoedit /opt/minecraft/server.properties     # level-seed=..., motd=..., difficulty=...
-sudo mc start                                 # the world is generated from it, now
+sudo usermod -aG minecraft "$USER"   # then log out and back in
 ```
 
-`level-seed` only matters here. It is consumed when the world is first created
-and has no effect afterwards, so a seed set later is silently ignored — the only
-way to change it on an existing server is to delete the world.
+### Upgrades
 
-Settings that are *not* world-creation-time (`motd`, `difficulty`, `max-players`,
-…) can be changed whenever you like; restart the server to apply them.
-
-`mc` keeps ownership of four keys in that file — `server-port`, `rcon.port`,
-`enable-rcon` and `rcon.password` — so a modpack cannot enable RCON with a
-password of its choosing. Your `server-port` and `rcon.port` are honoured and
-survive upgrades; `enable-rcon` and `rcon.password` are managed by `mc-rcon`,
-which keeps them in step with `/etc/minecraft/server.passwd`.
-
-#### Repeat runs
-
-Commands are safe to run when their work is already done — useful when `mc` is
-driven from Ansible, cloud-init, or a cron job rather than by hand.
-
-| Command | When the state already holds |
-| --- | --- |
-| `mc start` / `mc stop` | Says so and exits `0` |
-| `mc upgrade` | Skips the backup, the downtime, and the download |
-| `mc delete` | Says so and exits `0` without prompting |
-| `mc install` | **Refuses** — see below |
-| `mc install <pack.mrpack>` | Reuses unchanged mods instead of refetching them |
-
-`mc install` is the exception: run against a server that already exists it
-refuses outright, because it would overwrite `server.jar` and repin the version
-with none of the protections `upgrade` has. Use `mc upgrade` to change version,
-or `mc install --force` to deliberately reinstall over the top.
-
-`--force` on `upgrade` reinstalls the version you are already on.
+`mc upgrade` moves to the newest version of your configured server type. It
+decides whether there is anything to do **before** paying for a backup and the
+downtime of a stop, so running it on a schedule is cheap.
 
 > [!NOTE]
-> The `mc upgrade` skip applies to `vanilla` and `neoforge` only. Paper
-> publishes new *builds* and Fabric new *loader* versions against an unchanged
-> Minecraft version, and `server.conf` records only the Minecraft version — so
-> for those two, "same version" does not mean "same jar" and the upgrade always
-> proceeds.
+> The skip applies to `vanilla` and `neoforge` only. Paper publishes new
+> *builds* against an unchanged Minecraft version, and Fabric ships new *loader*
+> versions the same way — for those two, "same version" does not mean "same
+> jar", so the upgrade always runs.
 
-#### Configuration
+`mc upgrade` takes a backup first, and refuses to run without a backup provider
+unless you pass `--no-backup`. A server installed from a `.mrpack` can only be
+upgraded with another `.mrpack`.
 
-There are two kinds of configuration, in two places, and they do not overlap:
+## Configuration
 
-| | Configures | Where |
-| --- | --- | --- |
-| **`mc`** | How the server is installed and run — which build, which Java, how much heap, when to back up | `/etc/minecraft/` |
-| **The server** | What the game does — port, seed, MOTD, difficulty, game rules, RCON | `/opt/minecraft/server.properties` |
+There are two config files, and the split is deliberate.
 
-This section covers the first. For the second, edit `server.properties` and
-restart; see [Choosing the world before it
-exists](#choosing-the-world-before-it-exists).
+**`/etc/minecraft/config.toml`** — how to *run* the server. A conffile: your
+edits survive upgrades.
 
-`mc`'s own configuration is two files, layered. `/etc/minecraft/defaults.conf`
-ships with the package and holds the site-wide defaults — it is a `conffile`, so
-your edits survive upgrades. `/etc/minecraft/server.conf` is written by
-`mc install` / `mc upgrade` with the settings that install actually resolved, and
-it **overrides** `defaults.conf`.
+```toml
+[server]
+type = "paper"          # vanilla, paper, fabric, neoforge
+version = "1.21.4"      # written by mc install; "latest" resolves and pins
 
-Edit `defaults.conf` to change what a *future* install picks up; edit
-`server.conf` to change the server you already have.
+[java]
+# version = 21          # omit to select from the Minecraft version
+ram = "4G"
+flags = []              # empty auto-configures ZGC (21+) or Aikar's G1GC (17)
+opts = []               # e.g. ["-Dfile.encoding=UTF-8"]
 
-| Setting | Default | Applies |
-| --- | --- | --- |
-| `DEFAULT_SERVER_TYPE` | `vanilla` | At install (`--type` overrides) |
-| `MINECRAFT_VERSION` | `latest` | At install; pinned to a concrete version in `server.conf` |
-| `JAVA_VERSION` | *(auto)* | On restart — empty means "pick from the Minecraft version" |
-| `SERVER_RAM` | `4G` | On restart — sets both `-Xmx` and `-Xms` |
-| `SERVER_FLAGS` | *(auto)* | On restart — Generational ZGC on Java 21+, Aikar's G1GC on 17 |
-| `JAVA_OPTS` | *(empty)* | On restart — extra JVM options |
-| `BACKUP_KEEP` | `7` | Next backup |
-| `BACKUP_SCHEDULE` | `daily` | Next `mc install`/`mc upgrade` — see [Backups](#backups) |
+[backup]
+keep = 7                # 0 disables rotation (it does not delete everything)
+schedule = "daily"      # systemd OnCalendar= syntax
+```
 
-A typical tune-and-restart:
+**`/opt/minecraft/server.properties`** — what the *game* is: port, seed, MOTD,
+difficulty, RCON. The server reads and rewrites this file, so `mc` keeps no copy
+of anything in it. Edit it directly; `mc` re-applies only the four keys it owns
+(`server-port`, `enable-rcon`, `rcon.port`, `rcon.password`).
+
+Changing `backup.schedule` takes effect on the next `mc install`/`mc upgrade`,
+which regenerates the timer drop-in at
+`/etc/systemd/system/minecraft-backup.timer.d/schedule.conf`.
+
+## Plugins
+
+### `mc-rcon` — console and graceful shutdown
 
 ```bash
-sudoedit /etc/minecraft/server.conf   # SERVER_RAM="8G"
-sudo mc restart
+mc rcon                    # interactive console
+mc rcon list               # one command
+mc rcon status             # is RCON configured, and does it actually connect?
+sudo mc rcon enable        # provision a password and switch it on
 ```
 
-> [!NOTE]
-> **Ports belong to the server, so they live in `server.properties`.**
->
-> ```bash
-> sudoedit /opt/minecraft/server.properties   # server-port=..., rcon.port=...
-> sudo mc restart
-> ```
->
-> `mc` reads that file whenever it needs one of those values rather than keeping
-> a copy of its own. For RCON it dials `rcon.port` when the server sets one, and
-> the game port `+10` otherwise — so a port you choose is honoured and survives
-> upgrades. `mc rcon status` reports what it resolved.
+RCON is what lets `mc` talk to a running server, and installing this package
+changes three things beyond the console:
 
-#### Backups
-
-`mc-server` installs and enables `minecraft-backup.timer`, which runs
-`mc backup` on a schedule. Backups are gzipped tarballs in
-`/var/backups/minecraft/`, owned by root and mode `600`. If the server is
-running and RCON is available, `mc` issues `save-off` / `save-all` / `save-on`
-around the archive so the world is not captured mid-write — another reason to
-install `mc-rcon`.
-
-```bash
-mc backup                                          # on demand
-systemctl list-timers minecraft-backup.timer       # when does it next run
-mc restore /var/backups/minecraft/minecraft-20260807-020000.tar.gz
-```
-
-`mc restore` stops the server, validates every member of the archive before
-unpacking it as root, and restores in place. `BACKUP_KEEP` archives are
-retained; older ones are pruned after each successful backup.
-
-Changing the schedule needs one extra step, because the timer drop-in is only
-regenerated by `mc install` / `mc upgrade`. To change it now, edit the drop-in
-directly:
-
-```bash
-sudoedit /etc/systemd/system/minecraft-backup.timer.d/schedule.conf
-sudo systemctl daemon-reload
-```
-
-Keep `BACKUP_SCHEDULE` in `server.conf` in sync, or the next upgrade will
-overwrite the drop-in with the old value. The syntax is systemd's `OnCalendar=`
-— `daily`, `weekly`, `Mon *-*-* 02:00:00`.
-
-#### Modpacks
-
-`mc install` and `mc upgrade` accept a Modrinth `.mrpack` file, which pins the
-loader, the Minecraft version, and every mod in one shot. Requires `unzip`.
-
-```bash
-sudo apt install unzip
-sudo mc install ~/Downloads/cobblemon-1.6.1.mrpack --accept-eula --yes
-sudo mc upgrade ~/Downloads/cobblemon-1.7.0.mrpack
-```
-
-Only `formatVersion: 1` packs are supported, and mod downloads are restricted to
-an allowlist of Modrinth CDN hosts — a pack that points somewhere else is
-rejected rather than fetched.
-
-A server installed from a `.mrpack` can only be upgraded with another
-`.mrpack`; plain `mc upgrade --version` is refused, since the mods would not
-match the new Minecraft version. `mc upgrade` always takes a backup first and
-aborts if that backup fails.
-
----
-
-### `mc-rcon`
-
-Adds the `mc rcon` subcommand, providing interactive RCON console access and
-single-command execution against a running server.
-
-```bash
-sudo apt install mc-rcon
-```
-
-```
-mc rcon                    Open an interactive RCON session
-mc rcon <command>          Run a single command and print the response
-mc rcon status             Show whether RCON is on, on which port, and whether it answers
-sudo mc rcon enable        Turn RCON on in server.properties
-sudo mc rcon disable       Turn RCON off
-```
-
-The first three are open to root **and to members of the `minecraft` group** —
-they only read files that group can already read: the port in
-`server.properties` (`0640 minecraft:minecraft`) and the password in
-`/etc/minecraft/server.passwd` (`0640 root:minecraft`). To give an operator
-in-game admin without handing them the host:
-
-```bash
-sudo usermod -aG minecraft alice     # takes effect at alice's next login
-```
-
-`enable` and `disable` stay root-only, because they *write* `server.properties`
-— which the group can read but not write — and may create the password file in
-root-owned `/etc/minecraft`. As with every root-only command, running one at a
-terminal without `sudo` re-runs it under `sudo` rather than refusing.
-
-Note what that group grants: full operator control of the game server, `/stop`
-included. It is not a way to hand out a limited console.
-
-`enable`, `disable` and `status` act on `server.properties` rather than talking
-to the server, so they work while it is stopped — and while RCON is precisely
-what is currently off. The server reads that file at startup, so `mc restart` is
-needed to apply a change; `mc` tells you when that is the case rather than
-restarting a populated server on your behalf.
-
-Installing `mc-rcon` automatically enables RCON on the managed server and
-generates a random password stored in `/etc/minecraft/server.passwd` (readable
-only by root and the `minecraft` user). `mc install` provisions the same
-password if the plugin is present, so either install order works. Removing the
-package disables RCON again and restarts the server, leaving the password file
-in place so a reinstall restores the same secret.
-
-With RCON available, `mc stop` also becomes graceful: it warns players in-game
-and counts down before shutting the JVM down.
+- **Stopping warns players.** With at least one player online — or if the count
+  cannot be determined — a stop announces at 5, 3 and 1 minutes before it
+  happens. A provably empty server stops immediately.
+- **Backups are consistent.** The world is flushed and held still for the
+  duration of the archive, then saving is turned back on.
+- **RCON is configured for you** on install, with a generated password.
 
 > [!WARNING]
-> RCON is an **unencrypted protocol** — the password and all commands travel in
-> plaintext. The `rcon` binary enforces loopback-only connections and will
-> refuse any host that does not resolve to `127.0.0.0/8` or `::1`.
->
-> That check binds the **client** only. Minecraft itself has no RCON bind
-> address setting: the server listens on every interface it can, so enabling
-> `mc-rcon` opens port `25575` (game port + 10) to the network. Anyone who
-> reaches that port and has the password gets full console access. **Firewall
-> the RCON port**, e.g.:
->
-> ```bash
-> sudo ufw deny 25575/tcp
-> ```
+> **Do not expose the RCON port.** The protocol is unencrypted and unauthenticated
+> beyond a single password. The client refuses any host that is not loopback, and
+> the password lives in `/etc/minecraft/server.passwd` (0640 `root:minecraft`),
+> never in a command line. Firewall port `25575` (or whatever `rcon.port` says).
+
+The port is `rcon.port` from `server.properties` if set, otherwise your game
+port + 10. `mc rcon status` reports what it resolved.
+
+### `mc-backup` — backups and restores
+
+```bash
+sudo mc backup                                            # now
+sudo mc restore /var/backups/minecraft/minecraft-*.tar.gz # from an archive
+```
+
+Backups run on `backup.schedule` and keep the newest `backup.keep` archives.
+`logs/`, `crash-reports/` and `cache/` are excluded; `mods/` and `libraries/`
+are not, because a restore is a plain extraction with no re-download step.
+
+Archives are written by root into a root-owned `0700` directory and are never
+handed to the service account. A restore validates every member of the archive —
+names **and** entry types — before extracting anything, so an archive containing
+a symlink, hardlink or device node is refused rather than unpacked as root.
+
+### `mc-mrpack` — Modrinth modpacks
+
+```bash
+sudo mc install ~/Downloads/cobblemon-1.7.0.mrpack --accept-eula
+sudo mc upgrade ~/Downloads/cobblemon-1.8.0.mrpack
+```
+
+A `.mrpack` pins the Minecraft version, the loader and every mod in one file.
+Downloads are restricted to Modrinth's CDN over https, every file must publish a
+sha512 that is verified after download, and no pack file may be written outside
+the server directory. Forge and Quilt packs are refused, not silently mangled.
+
+### Writing your own
+
+A plugin is a `.deb` that drops a TOML manifest into `/usr/lib/mc/plugins.d/`
+and an executable into `/usr/libexec/mc/`:
+
+```toml
+abi  = 1
+name = "hello"
+bin  = "/usr/libexec/mc/mc-hello"
+
+[[commands]]
+name  = "hello"
+about = "Say hello"
+
+[[hooks]]
+event = "post-install"
+```
+
+Available events: `pre-start`, `pre-stop`, `pre-backup`, `post-backup`,
+`post-install`, `post-upgrade`. See
+[`.claude/skills/plugin-development`](.claude/skills/plugin-development/SKILL.md)
+for the full contract.
 
 ## File locations
 
-| Path | Contents |
-| --- | --- |
-| `/opt/minecraft` | Server jar, world, mods, `server.properties` |
-| `/etc/minecraft/defaults.conf` | Package defaults (a `conffile` — safe to edit) |
-| `/etc/minecraft/server.conf` | Resolved per-server config, written by `mc install` |
-| `/etc/minecraft/server.passwd` | RCON password, root + `minecraft` only |
-| `/etc/minecraft/server.mrpack.json` | Manifest of the installed modpack, if any |
-| `/var/backups/minecraft` | Backup archives, root-only `0700` |
-| `/usr/lib/mc/` | `mc` implementation and plugin commands |
-| `/run/minecraft/mc.lock` | Lock held by mutating `mc` commands |
-| `/lib/systemd/system/minecraft.service` | The server unit |
-| `/lib/systemd/system/minecraft-backup.{service,timer}` | Scheduled backups |
+| Path | Owner/mode | What |
+|---|---|---|
+| `/usr/bin/mc` | `root:root 0755` | the dispatcher |
+| `/usr/bin/rcon` | `root:root 0755` | standalone RCON client (`mc-rcon`) |
+| `/usr/libexec/mc/` | `root:root 0755` | plugin executables |
+| `/usr/lib/mc/plugins.d/` | `root:root 0644` | plugin manifests |
+| `/etc/minecraft/config.toml` | `root:root 0644` | mc's configuration (conffile) |
+| `/etc/minecraft/server.passwd` | `root:minecraft 0640` | the RCON password |
+| `/opt/minecraft/` | `minecraft:minecraft 0750` | the server and its world |
+| `/opt/minecraft/server.properties` | `minecraft:minecraft 0640` | the game's configuration |
+| `/var/backups/minecraft/` | `root:root 0700` | backup archives |
+| `/lib/systemd/system/minecraft.service` | `root:root 0644` | the unit |
+
+## Docker
+
+`mc` works without systemd. `mc serve` runs the server in the foreground, which
+is what an entrypoint wants:
+
+```dockerfile
+FROM debian:13-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl gpg && \
+    curl -fsSL https://apt.bulmer.dev/bulmer.asc | gpg --dearmor -o /etc/apt/keyrings/bulmer.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/bulmer.gpg] https://apt.bulmer.dev stable main" \
+      > /etc/apt/sources.list.d/bulmer.list && \
+    apt-get update && apt-get install -y mc-server mc-rcon
+RUN mc install --type paper --accept-eula --yes
+USER minecraft
+CMD ["mc", "serve"]
+```
+
+`mc install`, `mc serve` and `mc shutdown` all work with no systemd present;
+commands that drive the unit (`mc start`, `mc stop`, `mc status`) report that
+there is nothing to drive.
 
 ## Uninstalling
 
 ```bash
-sudo apt remove mc-rcon      # disables RCON, restarts the server
-sudo apt remove mc-server    # stops and disables the service and backup timer
+sudo mc delete                          # the server and its secrets; keeps backups
+sudo apt remove mc-server mc-rcon mc-backup mc-mrpack
+sudo apt purge  mc-server               # also removes /etc/minecraft/config.toml
 ```
 
-Removing `mc-server` leaves your world alone: `/opt/minecraft`,
-`/var/backups/minecraft`, and `/etc/minecraft/server.conf` all survive, so
-reinstalling picks up where you left off. `apt purge` additionally removes
-`/etc/minecraft/defaults.conf`.
-
-To destroy the server itself:
-
-```bash
-sudo mc delete    # prompts for confirmation; backups are preserved
-```
+`/var/backups/minecraft` and the `minecraft` user are deliberately left alone —
+the archives are your data, not the package's. Remove them by hand if you mean
+to.
 
 ## Troubleshooting
 
-**`mc stop` takes five minutes.** By design. When players are online — or when
-the player count cannot be read for any reason — `stop.sh` runs a full
-five-minute in-game countdown before shutting down, because a JVM killed
-mid-chunk-flush corrupts the world. An empty server stops immediately. The unit
-allows `TimeoutStopSec=375s` for the whole procedure.
+**The server will not start.** `mc logs`, or `systemctl status minecraft`. An
+exit code of **78** means an operator-fixable problem — the EULA is not
+accepted, `server.properties` is unreadable, or there is no server jar — and
+systemd deliberately does *not* restart it. Any other non-zero exit is a real
+crash and does get restarted.
 
-The shutdown narrates itself to the journal, so you can tell a countdown from a
-hung connection — `journalctl -u minecraft -f` shows the player count, each
-warning as it is broadcast, and how long the next wait is. If RCON is
-unavailable it says that too, and stops without warning anyone.
-
-**"Could not acquire lock /run/minecraft/mc.lock".** Another `mc` command is
-mutating the server. `mc` reports the holding PID and command; stale locks are
-cleared automatically when the holder is gone.
-
-**"the Minecraft EULA has not been accepted".** The server refuses to launch
-unless `/opt/minecraft/eula.txt` contains `eula=true` — including when started
-with `systemctl start minecraft` rather than `mc start`. Servers installed by
-`mc` have already accepted; this only shows up if the file was removed or set
-back to `false`. To accept it on a server that already exists:
+**"server.properties is not readable and writable".** It is root-owned. Editing
+it as root with an editor that writes and renames leaves it that way, and the
+server would otherwise start on compiled-in defaults and generate a stray world
+beside the real one.
 
 ```bash
-sudo mc start --accept-eula
+sudo chown minecraft:minecraft /opt/minecraft/server.properties
+sudo chmod 640 /opt/minecraft/server.properties
 ```
 
-**The service will not start.** `mc status` shows the systemd state, `mc logs`
-follows the journal. `journalctl -u minecraft -n 100 --no-pager` gets you the
-tail without following.
+Use `sudoedit`, which preserves ownership.
 
-**Java errors after a Minecraft upgrade.** `JAVA_VERSION` in `server.conf` may
-be pinned to an older runtime. Clear it to restore auto-selection, then
-`mc restart`.
+**`mc rcon` says "Connection: FAILED".** The server reads `server.properties` at
+startup, so RCON settings need a restart to take effect: `sudo mc restart`.
 
-**Mods cannot write outside `/opt/minecraft`.** Also by design — the unit runs
-under `ProtectSystem=strict` with `ReadWritePaths=/opt/minecraft`. A mod that
-needs another writable path needs that path added to the unit via a drop-in.
+**A command says "Unknown command".** It comes from a plugin you do not have.
+The message names the package; `mc plugins` shows what is installed, including
+any plugin that failed to load and why.
+
+**"plugin declares ABI N but this mc implements ABI M".** The packages are out
+of step. `sudo apt update && sudo apt upgrade` brings them back in line.
+
+**Java errors after a Minecraft upgrade.** Set `java.version` in
+`/etc/minecraft/config.toml`, or remove it to let mc choose.
+
+**`mc stop` takes five minutes.** That is the countdown, with players online or
+a player count that could not be determined. `mc logs` shows which.
 
 ## Security
 
-The `minecraft` service runs unprivileged and sandboxed: `NoNewPrivileges`,
-`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, dropped
-kernel-tunable and module access, and an address-family allowlist. The intent is
-that a compromised mod or JVM cannot reach anything outside the server's own
-data directory. (`MemoryDenyWriteExecute` is deliberately omitted — the JIT
-needs W+X pages and the server would not start under it.)
-
-Backups are written and read by root only, never handed to the `minecraft` user,
-so a compromised server cannot rewrite an archive that a later `mc restore`
-unpacks as root. Archive members are validated for traversal, absolute paths,
-and non-regular entry types before extraction.
-
-Membership of the `minecraft` group is a real grant: it carries read access to
-the RCON password, and so to full in-game operator control including `/stop`. It
-confers nothing on the host — writes to `/opt/minecraft`, `/etc/minecraft` and
-the backups stay root-only.
-
-`mc`'s automatic `sudo` is a convenience, not a privilege: it re-runs the same
-command through `sudo`, which applies the system's own policy unchanged. It is
-skipped entirely when there is no terminal to prompt at.
-
-All packages are signed; `apt` verifies them against the key above.
+- The server runs as the unprivileged `minecraft` user under a hardened systemd
+  unit — `ProtectSystem=strict`, `NoNewPrivileges`, `PrivateDevices`, and
+  `/opt/minecraft` as the only writable path.
+- The RCON password is generated (192 bits), stored `0640 root:minecraft`, and
+  passed to the client by file — never in argv, which is world-readable through
+  `/proc/<pid>/cmdline`.
+- Downloaded artifacts are verified against the digest their index publishes,
+  and an index that publishes none is a refusal rather than a skip. (The one
+  exception is Fabric's server jar, which upstream publishes no hash for; it is
+  trusted on TLS alone, and this is documented in the source.)
+- Modpacks and backup archives are treated as attacker-controlled: paths that
+  escape the server directory, downloads from unlisted hosts, and archive
+  members that are links or device nodes are all refused before anything is
+  written.
+- Report a vulnerability to <dylan@bulmer.dev>.
 
 ## Development
 
-### Building packages
-
 ```bash
-bash scripts/build.sh mc-server
-bash scripts/build.sh mc-rcon
+cargo test --workspace     # unit, integration and security suites — ~1 s
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all --check
+
+tests/run.sh               # container suites (Docker) — packaging, ACLs, plugins
+tests/run.sh --all         # + one real install of each server type
+
+bash scripts/build.sh mc-server   # → dist/*.deb  (needs Debian, or the container)
 ```
 
-Built `.deb` files are written to `dist/`. `mc-server` is `Architecture: all`;
-`mc-rcon` is compiled C and builds for whatever architecture you are on.
+The workspace is `crates/`; `packages/<name>/` mirrors the target filesystem
+root and holds everything not compiled. `scripts/build.sh` joins them.
 
-Install a build locally to test it:
+**Bump `Version:` in `DEBIAN/control` in the same commit as any change to a
+package.** CI publishes on every push and reprepro regenerates its indexes per
+run, so a change without a bump is served under the old version and never
+reaches an installed system.
 
-```bash
-sudo dpkg -i dist/mc-server_0.5.0_all.deb
-sudo apt-get install -f     # pull in missing dependencies
-```
+CI runs the test suite, builds every package on a native runner per
+architecture, then signs and indexes. A red test gate blocks publishing.
 
-### Running the tests
-
-```bash
-tests/run.sh              # unit + integration      ~30 s, no network
-tests/run.sh --all        # + a real install of every server type (network)
-tests/run.sh unit/ports   # a single suite
-```
-
-Docker is required. `run.sh` builds a Debian image, builds both `.deb` files,
-installs them in a container, and runs the suites against the installed
-packages — so it covers the maintainer scripts and file modes, not just the
-shell functions. See [`tests/README.md`](tests/README.md) for the layout and
-how to add a suite.
-
-### Adding a package
-
-Create `packages/<name>/` mirroring the target filesystem — `DEBIAN/control`
-plus the paths the package installs (`usr/bin/`, `etc/`, `lib/systemd/system/`).
-Add a `src/` directory if it needs compiling, and `build.sh` will run `make` and
-stage the result for you. Subcommand plugins for `mc` drop a file into
-`usr/lib/mc/commands.d/` and register themselves with `mc_register_command`, as
-`mc-rcon` does.
-
-Bump `Version:` in `DEBIAN/control` for every change you publish — `reprepro`
-refuses to include a version that is already in the pool.
-
-### Publishing to the repo
-
-```bash
-bash scripts/publish.sh dist/mc-server_0.5.0_all.deb
-bash scripts/publish.sh dist/mc-rcon_0.4.2_amd64.deb
-```
-
-Requires `reprepro` and the private signing key imported into your GPG keyring.
-
-### CI/CD
-
-Pushing to `main` (with changes under `packages/`) or pushing a `v*` tag
-triggers the [publish workflow](.github/workflows/publish.yml), which builds
-packages on native `amd64` and `arm64` runners, signs and indexes them with
-`reprepro`, and publishes a new multi-arch Docker image to
-`ghcr.io/dylanbulmer/apt`.
-
-Pull requests build and verify packages but never sign or publish. A
-`workflow_dispatch` run with `republish: true` re-signs and re-publishes the
-`.deb` artifacts from the last successful build without rebuilding them.
+Repository guidance for contributors — and for Claude Code — lives in
+[`CLAUDE.md`](CLAUDE.md) and `.claude/skills/`.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+[MIT](LICENSE) © Dylan Bulmer

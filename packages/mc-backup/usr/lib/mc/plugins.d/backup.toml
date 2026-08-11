@@ -1,0 +1,15 @@
+# mc plugin manifest — see the plugin-development skill for the contract.
+abi  = 1
+name = "backup"
+bin  = "/usr/libexec/mc/mc-backup"
+
+[[commands]]
+name  = "backup"
+about = "Create a timestamped backup of the server"
+
+[[commands]]
+name  = "restore"
+about = "Restore the server from a backup archive"
+
+# This package registers no hooks: it EMITS pre-backup and post-backup, which
+# whichever console plugin is installed handles.

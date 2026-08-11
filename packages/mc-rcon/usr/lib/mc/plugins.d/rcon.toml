@@ -1,0 +1,28 @@
+# mc plugin manifest — see the plugin-development skill for the contract.
+abi  = 1
+name = "rcon"
+bin  = "/usr/libexec/mc/mc-rcon"
+
+[[commands]]
+name  = "rcon"
+about = "Open an RCON console, or run one command against the server"
+
+# Warn players and count them down before the server stops. Never fatal: a
+# shutdown must not abort because a warning could not be delivered.
+[[hooks]]
+event = "pre-stop"
+
+# Hold the world still for the duration of an archive.
+[[hooks]]
+event = "pre-backup"
+
+# Turn saving back on. Runs whether or not the backup succeeded.
+[[hooks]]
+event = "post-backup"
+
+# Provision the password and switch RCON on for a newly installed server.
+[[hooks]]
+event = "post-install"
+
+[[hooks]]
+event = "post-upgrade"

@@ -1,0 +1,36 @@
+# mc configuration — how to RUN the server.
+#
+# The server's OWN settings (port, seed, MOTD, difficulty, RCON) are not here.
+# They live in /opt/minecraft/server.properties, which the JVM reads and
+# rewrites; anything mirrored here could only go stale.
+#
+# A conffile: dpkg will ask before overwriting your edits on upgrade.
+
+[server]
+# vanilla (default), paper, fabric, neoforge
+type = "vanilla"
+# "latest", or a concrete version. `mc install` resolves "latest" and writes the
+# concrete result back here, so a later `mc upgrade` can tell what moved.
+version = "latest"
+
+[java]
+# Major version to launch with. Omit to select from the Minecraft version:
+#   1.20.5+ / 1.21.x -> 21     26.x -> 25     1.18-1.20.4 -> 17
+# version = 21
+
+# Heap size, passed to -Xmx and -Xms.
+ram = "4G"
+
+# JVM GC flags. Leave empty to auto-configure from the Java version:
+#   Java 21+  Generational ZGC (sub-millisecond pauses)
+#   Java 17   Aikar's G1GC tuning (~200 ms pause target)
+flags = []
+
+# Extra JVM options, e.g. ["-Dfile.encoding=UTF-8"]
+opts = []
+
+[backup]
+# Archives to retain. 0 disables rotation (it does not delete everything).
+keep = 7
+# systemd OnCalendar= syntax — "daily", "weekly", "Mon *-*-* 02:00:00"
+schedule = "daily"

@@ -1,0 +1,22 @@
+Package: mc-backup
+Version: 1.0.0
+Architecture: any
+Maintainer: Dylan Bulmer <dylan@bulmer.dev>
+Depends: mc-server, ${shlibs:Depends}
+Recommends: mc-rcon
+Section: admin
+Priority: optional
+Homepage: https://apt.bulmer.dev
+Description: Backup and restore plugin for mc-server
+ Adds 'mc backup' and 'mc restore', and a systemd timer that runs backups on the
+ schedule set in /etc/minecraft/config.toml.
+ .
+ Archives are written by root into a root-owned 0700 directory and are never
+ handed to the service account, which is the one exposed to untrusted mods. A
+ restore validates every archive member — names and entry types both — before
+ anything is extracted, so an archive containing a symlink, a hardlink or a
+ device node is refused rather than unpacked as root.
+ .
+ Recommends mc-rcon: with it, the world is flushed and held still for the
+ duration of an archive. Without it the backup is still taken, but of a world
+ that was not flushed.

@@ -1,0 +1,28 @@
+[package]
+name = "mc-rcon"
+description = "RCON console plugin for the mc Minecraft server manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Two binaries. Keep both names in step with scripts/build.sh, which copies them
+# into the package staging tree by name.
+[[bin]]
+name = "mc-rcon"      # → /usr/libexec/mc/mc-rcon, invoked by core
+path = "src/bin/mc-rcon.rs"
+
+[[bin]]
+name = "rcon"         # → /usr/bin/rcon, the operator-facing client
+path = "src/bin/rcon.rs"
+
+[dependencies]
+mc-common = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

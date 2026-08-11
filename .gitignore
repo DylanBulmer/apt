@@ -2,8 +2,10 @@
 dist/
 staging/
 
-# Compiled binaries inside source tree
-packages/*/src/rcon
+# Cargo build output. Cargo.lock IS tracked: these crates ship as binaries, and
+# a reproducible .deb means pinning the whole dependency graph, not just the
+# direct requirements.
+target/
 
 # reprepro state (generated, not source-controlled)
 repo/db/

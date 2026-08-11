@@ -1,0 +1,20 @@
+[Unit]
+Description=Minecraft Server Backup Timer
+Documentation=https://apt.bulmer.dev
+
+[Timer]
+# The shipped default. The effective schedule comes from `backup.schedule` in
+# /etc/minecraft/config.toml, which mc writes into a drop-in at
+# /etc/systemd/system/minecraft-backup.timer.d/schedule.conf.
+OnCalendar=daily
+
+# Runs a missed backup after a reboot rather than skipping to the next window.
+# A machine that is off overnight would otherwise never back up at all.
+Persistent=true
+
+# Spreads the load when several servers share a host, and keeps every backup in
+# a fleet from starting on the same second.
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

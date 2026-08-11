@@ -1,0 +1,14 @@
+[Unit]
+Description=Minecraft Server Backup
+After=network.target
+Documentation=https://apt.bulmer.dev
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/mc backup
+
+# Bounded so a wedged backup cannot hold the mc lock forever and block every
+# install, upgrade and restore behind it. Generous: a large modded world on slow
+# storage is minutes, not seconds.
+TimeoutStartSec=2h

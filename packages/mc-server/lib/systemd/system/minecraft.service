@@ -21,8 +21,8 @@ WorkingDirectory=/opt/minecraft
 
 # ── Hardening ──────────────────────────────────────────────────────────────
 # The server already runs as the unprivileged 'minecraft' user (above). These
-# directives stop a compromised JVM or mod from regaining privileges or
-# touching anything outside the server's own data directory.
+# stop a compromised JVM or mod from regaining privileges or touching anything
+# outside the server's own data directory.
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/opt/minecraft
@@ -39,20 +39,25 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # NOTE: MemoryDenyWriteExecute is intentionally omitted — the JVM's JIT needs
 # writable+executable pages and would fail to start under it.
 
-ExecStart=/usr/lib/mc/start.sh
-ExecStop=/usr/lib/mc/stop.sh
-ExecReload=/usr/lib/mc/reload.sh
+# All three run as the `minecraft` user under the restrictions above, NOT as
+# root. `mc serve`, `mc shutdown` and `mc reload` are declared
+# Requirement::ServiceAccount in the CLI's privilege table, and a test asserts
+# they take no root guard: one added here means the server never starts, with a
+# failure that reads as a config problem rather than a permission one.
+ExecStart=/usr/bin/mc serve
+ExecStop=/usr/bin/mc shutdown
+ExecReload=/usr/bin/mc reload
 
 # Outer bound on the whole stop procedure (ExecStop + SIGTERM) before systemd
-# sends SIGKILL. Derived from the worst-case path through stop.sh — the
-# 5-minute tier, taken whenever at least one player is online OR the player
-# count cannot be determined (everything except a provably empty server):
+# sends SIGKILL. Derived from the worst-case path through mc-rcon's pre-stop
+# hook — the 5-minute tier, taken whenever at least one player is online OR the
+# player count cannot be determined (everything except a provably empty server):
 #
-#   list query           15 s   (RCON_CMD_TIMEOUT)
+#   list query           15 s   (CMD_DEADLINE)
 #   countdown 300 180 60
 #     sleeps             300 s  (120 + 120 + 60)
-#     3x say announce     15 s  (3 x RCON_SAY_TIMEOUT, worst case)
-#   stop command         15 s   (RCON_CMD_TIMEOUT)
+#     3x announcement     15 s  (worst case)
+#   stop command         15 s
 #   chunk-flush sleep     10 s
 #   ------------------------------
 #   worst case           355 s
@@ -63,8 +68,10 @@ ExecReload=/usr/lib/mc/reload.sh
 # On a healthy server the RCON calls are sub-millisecond, so the real elapsed
 # time is ~310 s and the JVM gets ~65 s after SIGTERM to finish exiting.
 #
-# If you change RCON_SAY_TIMEOUT / RCON_CMD_TIMEOUT or the countdown tiers in
-# stop.sh, recompute this value.
+# THIS ARITHMETIC IS ASSERTED IN A TEST — mc-rcon's
+# `the_schedule_fits_inside_the_units_stop_timeout`. Re-tiering the countdown
+# without recomputing this value fails there rather than in production, where
+# overrunning it means a SIGKILL through the JVM's chunk flush.
 TimeoutStopSec=375s
 TimeoutStartSec=60s
 
@@ -73,21 +80,22 @@ KillMode=process
 
 # ── Failure reporting ──────────────────────────────────────────────────────
 # There is deliberately NO SuccessExitStatus= here. Declaring an exit code a
-# success to stop start.sh's config refusals from restart-looping would silence
-# genuine crashes with it — a JVM that dies of a real fault exits non-zero too,
-# and the unit would go inactive with Result=success while Restart=on-failure
-# never fired. Anything watching would be told the server stopped on purpose.
+# success to stop `mc serve`'s config refusals from restart-looping would
+# silence genuine crashes with it — a JVM that dies of a real fault exits
+# non-zero too, and the unit would go inactive with Result=success while
+# Restart=on-failure never fired. Anything watching would be told the server
+# stopped on purpose.
 #
-# start.sh instead exits 78 (EX_CONFIG, sysexits(3)) for operator-fixable
+# `mc serve` instead exits 78 (EX_CONFIG, sysexits(3)) for operator-fixable
 # problems, which keeps the two cases distinguishable:
 #
-#   exit 0    clean shutdown            → inactive, no restart
-#   exit 78   misconfiguration          → failed, NOT restarted (see below)
+#   exit 0    clean shutdown             → inactive, no restart
+#   exit 78   misconfiguration           → failed, NOT restarted (see below)
 #   anything  crash, OOM-kill, JVM abort → failed, restarted after RestartSec
 #
 # 78 still marks the unit failed, which is the point: the problem is real and
 # should be visible to `systemctl status`. RestartPreventExitStatus is what
-# stops it from looping every 10 s over something no restart can fix.
+# stops it looping every 10 s over something no restart can fix.
 Restart=on-failure
 RestartSec=10s
 RestartPreventExitStatus=78
