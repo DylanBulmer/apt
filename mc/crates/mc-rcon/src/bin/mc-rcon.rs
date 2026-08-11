@@ -97,7 +97,12 @@ fn command(paths: &Paths, args: &[String]) -> Result<()> {
     }
 }
 
-fn verb(paths: &Paths, argv: &[String], rest: &[String], f: fn(&Paths) -> Result<()>) -> Result<()> {
+fn verb(
+    paths: &Paths,
+    argv: &[String],
+    rest: &[String],
+    f: fn(&Paths) -> Result<()>,
+) -> Result<()> {
     if rest.len() > 1 {
         return Err(Error::config(format!(
             "mc rcon {} takes no arguments.",

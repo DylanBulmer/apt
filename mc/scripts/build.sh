@@ -72,6 +72,22 @@ if [[ "$PACKAGE" == "mc-server" ]]; then
     ( cd "$ROOT" && cargo run --release --locked -p xtask -- man "$STAGING_DIR/usr/share/man/man1" )
 fi
 
+# ── Completions ────────────────────────────────────────────────────────────
+#
+# Core-only completions generated from the clap tree. Plugin subcommands are
+# not included — `mc completions <shell>` is the dynamic path that discovers
+# them at runtime. The static file is a convenience baseline so completions
+# work immediately after install.
+if [[ "$PACKAGE" == "mc-server" ]]; then
+    echo "Generating completions..."
+    mkdir -p "$STAGING_DIR/usr/share/bash-completion/completions"
+    mkdir -p "$STAGING_DIR/usr/share/zsh/vendor-completions"
+    ( cd "$ROOT" && cargo run --release --locked -p xtask \
+        -- completions bash "$STAGING_DIR/usr/share/bash-completion/completions" )
+    ( cd "$ROOT" && cargo run --release --locked -p xtask \
+        -- completions zsh "$STAGING_DIR/usr/share/zsh/vendor-completions" )
+fi
+
 # ── Dependencies ───────────────────────────────────────────────────────────
 #
 # ${shlibs:Depends} is a debhelper substitution variable, and nothing

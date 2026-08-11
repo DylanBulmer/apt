@@ -19,6 +19,7 @@ path = "src/main.rs"
 # makes a new subcommand impossible to ship undocumented.
 mc = { path = "../mc" }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 # Escaping and apostrophe handling for the generated parts. The prose sections
 # are raw roff fragments and deliberately bypass it.
 roff = "1"

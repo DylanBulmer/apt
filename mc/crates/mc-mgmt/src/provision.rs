@@ -99,7 +99,10 @@ pub fn enable(paths: &Paths) -> Result<bool> {
     // operator makes deliberately, not one mc makes for them. An existing
     // host or TLS setting is preserved: resetting them on every upgrade would
     // undo a deliberate deployment behind a TLS-terminating proxy.
-    if props.get(endpoint::HOST).is_none_or(|h| h.trim().is_empty()) {
+    if props
+        .get(endpoint::HOST)
+        .is_none_or(|h| h.trim().is_empty())
+    {
         props.set(endpoint::HOST, "localhost");
     }
     props.set(endpoint::PORT, &port.to_string());

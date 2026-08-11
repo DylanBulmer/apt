@@ -17,8 +17,6 @@ pub const PORT: &str = "management-server-port";
 pub const SECRET: &str = "management-server-secret";
 pub const TLS: &str = "management-server-tls-enabled";
 
-
-
 /// A resolved endpoint: where to connect, and what to authenticate with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {

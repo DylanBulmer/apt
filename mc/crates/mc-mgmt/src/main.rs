@@ -342,7 +342,9 @@ fn enable(paths: &Paths) -> Result<()> {
     let port = provision::port(&props);
 
     if changed {
-        ui::info(format!("Management protocol enabled on port {port} — restart to apply"));
+        ui::info(format!(
+            "Management protocol enabled on port {port} — restart to apply"
+        ));
     } else {
         ui::info(format!(
             "Management protocol already enabled on port {port}."

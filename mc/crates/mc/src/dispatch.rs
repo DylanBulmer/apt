@@ -2,6 +2,7 @@
 
 use clap::Parser as _;
 use mc_common::error::{Error, Result};
+use mc_common::paths::Paths;
 use mc_common::plugin::Registry;
 use mc_common::ui;
 
@@ -181,10 +182,63 @@ fn man(ctx: &Ctx, topic: Option<&str>) -> Result<()> {
 fn completions(shell: clap_complete::Shell) -> Result<()> {
     use clap::CommandFactory as _;
     // Generated from the parser rather than hand-maintained, so a new
-    // subcommand cannot ship with stale completions. Plugin subcommands are not
-    // in here — they are discovered at runtime and completed by the shell
-    // wrapper the package installs.
+    // subcommand cannot ship with stale completions. Plugin subcommands are
+    // discovered at runtime: the completion script reflects what is installed.
     let mut command = Cli::command();
+    let paths = Paths::from_env();
+    let registry = Registry::discover(&paths);
+    // Owned names: `registry.commands()` borrows from the registry, and
+    // clap_complete requires `'static` strings, so we collect first.
+    let commands: Vec<(&'static str, &'static str)> = registry
+        .plugins()
+        .iter()
+        .flat_map(|p| p.commands.iter())
+        .map(|c| {
+            let name = Box::leak(c.name.clone().into_boxed_str());
+            let about = Box::leak(c.about.clone().into_boxed_str());
+            (name as &'static str, about as &'static str)
+        })
+        .collect();
+    for (name, about) in commands {
+        command = command.subcommand(clap::Command::new(name).about(about));
+    }
     clap_complete::generate(shell, &mut command, "mc", &mut std::io::stdout());
     Ok(())
+}
+
+#[cfg(test)]
+mod completions_tests {
+    use super::*;
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn completions_output_contains_core_commands() {
+        let mut command = Cli::command();
+        let paths = Paths::from_env();
+        let registry = Registry::discover(&paths);
+        let commands: Vec<(&'static str, &'static str)> = registry
+            .plugins()
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .map(|c| {
+                let name = Box::leak(c.name.clone().into_boxed_str());
+                let about = Box::leak(c.about.clone().into_boxed_str());
+                (name as &'static str, about as &'static str)
+            })
+            .collect();
+        for (name, about) in commands {
+            command = command.subcommand(clap::Command::new(name).about(about));
+        }
+
+        let mut buf = Vec::new();
+        clap_complete::generate(clap_complete::Shell::Bash, &mut command, "mc", &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+
+        for core_cmd in ["install", "start", "stop", "status", "plugins"] {
+            assert!(
+                output.contains(core_cmd),
+                "completions missing core command: {core_cmd}"
+            );
+        }
+    }
 }
