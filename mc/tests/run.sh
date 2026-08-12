@@ -124,32 +124,8 @@ run_suite() { # run_suite <relative path under tests/suites, no .sh>
 if [[ ${#SUITES[@]} -gt 0 ]]; then
     for s in "${SUITES[@]}"; do run_suite "$s"; done
 elif [[ "$RUN_INTEGRATION" == yes ]]; then
-    # Run all integration suites in parallel — each is an independent container
-    # with no shared state, so they scale across CPUs.
-    printf '\n==> integration suites (parallel)\n'
-    mkdir -p "$WORK/results"
     for f in "$HERE"/suites/integration/*.sh; do
-        name="integration/$(basename "$f" .sh)"
-        base="${name##*/}"
-        printf '    %s\n' "$name"
-        docker run --rm \
-            -v "$ROOT":/work:ro \
-            -v "$WORK/dist":/dist:ro \
-            -v "$WORK/results":/res \
-            -e MC_REPO=/work \
-            "$TEST_IMAGE" \
-            bash -c "bash /work/tests/suites/${name}.sh 2>&1 | tee /res/${base}.txt; echo \$? > /res/${base}.exit" &
-    done
-    wait
-    for f in "$HERE"/suites/integration/*.sh; do
-        name="integration/$(basename "$f" .sh)"
-        base="${name##*/}"
-        exit_code=$(cat "$WORK/results/${base}.exit")
-        if [[ "$exit_code" != "0" ]]; then
-            FAILED+=("$name")
-            printf '\n==> %s FAILED\n' "$name"
-            cat "$WORK/results/${base}.txt"
-        fi
+        run_suite "integration/$(basename "$f" .sh)"
     done
 fi
 
