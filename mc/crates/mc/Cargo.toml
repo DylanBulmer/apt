@@ -1,0 +1,32 @@
+[package]
+name = "mc"
+description = "Minecraft server lifecycle manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# One binary, installed to /usr/bin/mc. Keep this name in step with
+# scripts/build.sh, which copies `target/release/mc` into the package staging
+# tree — a rename here that is not made there produces a .deb with no
+# dispatcher in it and a packaging step that still reports success.
+[[bin]]
+name = "mc"
+path = "src/main.rs"
+
+[dependencies]
+mc-common = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+serde = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order"] }
+nix = { version = "0.30", features = ["user", "fs"] }
+
+[dev-dependencies]
+mc-common = { workspace = true, features = ["testkit"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

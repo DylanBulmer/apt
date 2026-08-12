@@ -1,0 +1,97 @@
+.\" This package contributes no subcommand — it claims a file extension. The
+.\" page is named mc-mrpack.1 so `mc man mrpack` and the plugin naming rule in
+.\" mc-plugins(5) both land here.
+.TH MC-MRPACK 1 "" "mc" "mc manual"
+.SH NAME
+mc-mrpack \- install an mc-managed Minecraft server from a Modrinth modpack
+.SH SYNOPSIS
+.B mc install
+.IB pack .mrpack
+.RI [ OPTIONS ]
+.br
+.B mc upgrade
+.IB pack .mrpack
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+The
+.B mc-mrpack
+package teaches
+.BR mc (1)
+to install from a Modrinth
+.B .mrpack
+file. It adds no subcommand of its own: it claims the
+.B mrpack
+extension, so naming such a file where
+.B mc install
+expects a version routes the work here.
+.PP
+A
+.B .mrpack
+pins the Minecraft version, the mod loader and every mod in one artifact, which
+is what makes a modded server reproducible. mc reads the pack's index, resolves
+the loader, downloads every file, and stages the result; core keeps the lock,
+the EULA gate, ownership of
+.I /opt/minecraft
+and the keys of
+.I server.properties
+that it owns.
+.PP
+The loader is detected from the pack's own dependencies. Fabric and NeoForge
+packs are supported; a Forge or Quilt pack is refused by name rather than
+silently mangled into something that will not boot. A server installed from a
+pack can only be upgraded with another pack.
+.SH SECURITY
+A
+.B .mrpack
+is attacker-controlled input processed as root, so it is validated in three
+phases: everything is parsed and checked with
+.I no network access at all,
+then files are fetched, then every file is verified.
+.IP \(bu 2
+Downloads must come from Modrinth's own CDN, over https. A pack that names any
+other host is refused.
+.IP \(bu 2
+Every file must publish a sha512, which is checked after download. A file that
+does not match is a failure, not a warning.
+.IP \(bu 2
+No path in the pack may be written outside the server directory:
+.IR .. ,
+absolute paths and symlink traversal are all refused before anything is
+fetched.
+.IP \(bu 2
+The pack's own
+.I server.properties
+is merged, and then mc re-applies the keys it owns \(em so a pack cannot enable
+RCON with a password of its choosing, or move the server to a port you did not
+pick.
+.SH EXAMPLES
+.PP
+.nf
+.RS
+sudo mc install ~/Downloads/cobblemon\-1.7.0.mrpack \-\-accept\-eula
+sudo mc upgrade ~/Downloads/cobblemon\-1.8.0.mrpack
+.RE
+.fi
+.PP
+The Java version comes from the pack's Minecraft version and is installed for
+you with
+.BR \-\-yes .
+.SH FILES
+.TP
+.I /opt/minecraft/
+Where the staged pack lands, once every file has been verified.
+.TP
+.I /etc/minecraft/server.mrpack.json
+What was installed, so
+.B mc upgrade
+knows this server came from a pack.
+.TP
+.I /usr/libexec/mc/mc-mrpack
+The provider executable. Invoked by mc with a staging directory; see
+.BR mc-plugins (5)
+for the protocol.
+.SH SEE ALSO
+.BR mc (1),
+.BR mc-config (5),
+.BR mc-plugins (5),
+.BR mc-backup (1)

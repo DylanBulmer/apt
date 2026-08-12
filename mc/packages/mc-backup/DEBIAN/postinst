@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        mkdir -p /var/backups/minecraft
+        chown root:root /var/backups/minecraft
+        chmod 700 /var/backups/minecraft
+
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+            systemctl enable minecraft-backup.timer || true
+            systemctl start  minecraft-backup.timer 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

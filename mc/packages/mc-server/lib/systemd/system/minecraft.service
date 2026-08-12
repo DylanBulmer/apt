@@ -1,0 +1,111 @@
+[Unit]
+Description=Minecraft Server
+After=network.target
+Documentation=https://apt.bulmer.dev
+
+# Bound on Restart=on-failure below. A server that crashes during startup — a
+# broken mod, a corrupt level.dat, an out-of-memory heap size — fails the same
+# way every time, and retrying it every RestartSec forever leaves the unit
+# permanently "activating" while never reaching a state anything can alert on.
+# After 5 failures in an hour systemd stops retrying and the unit sits in
+# `failed`, which is the honest answer. Occasional unrelated crashes stay well
+# inside the window and still recover automatically.
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=minecraft
+Group=minecraft
+WorkingDirectory=/opt/minecraft
+
+# ── Hardening ──────────────────────────────────────────────────────────────
+# The server already runs as the unprivileged 'minecraft' user (above). These
+# stop a compromised JVM or mod from regaining privileges or touching anything
+# outside the server's own data directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/minecraft
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# NOTE: MemoryDenyWriteExecute is intentionally omitted — the JVM's JIT needs
+# writable+executable pages and would fail to start under it.
+
+# All three run as the `minecraft` user under the restrictions above, NOT as
+# root. `mc serve`, `mc shutdown` and `mc reload` are declared
+# Requirement::ServiceAccount in the CLI's privilege table, and a test asserts
+# they take no root guard: one added here means the server never starts, with a
+# failure that reads as a config problem rather than a permission one.
+ExecStart=/usr/bin/mc serve
+ExecStop=/usr/bin/mc shutdown
+ExecReload=/usr/bin/mc reload
+
+# Outer bound on the whole stop procedure (ExecStop + SIGTERM) before systemd
+# sends SIGKILL. Derived from the worst-case path through the elected console's
+# pre-stop hook — the 5-minute tier, taken whenever at least one player is
+# online OR the player count cannot be determined (everything except a provably
+# empty server):
+#
+#   console election       3 s  (plugin::PROBE_DEADLINE)
+#   list query            15 s  (CMD_DEADLINE)
+#   countdown 300 180 60
+#     sleeps              300 s (120 + 120 + 60)
+#     3x announcement      15 s (worst case)
+#   stop command          15 s
+#   chunk-flush sleep     10 s
+#   ------------------------------
+#   worst case           358 s
+#   safety buffer         22 s
+#   ------------------------------
+#   TimeoutStopSec       380 s
+#
+# The election is charged ONCE, not once per installed console: it stops at the
+# first console that answers, and if none answers there is no elected console
+# and so no countdown to pay for either.
+#
+# On a healthy server the console calls are sub-millisecond, so the real elapsed
+# time is ~310 s and the JVM gets ~70 s after SIGTERM to finish exiting.
+#
+# THIS ARITHMETIC IS ASSERTED IN A TEST — mc-common's
+# `the_schedule_fits_inside_the_units_stop_timeout`, which READS THIS FILE.
+# Re-tiering the countdown without recomputing this value fails there rather
+# than in production, where overrunning it means a SIGKILL through the JVM's
+# chunk flush.
+TimeoutStopSec=380s
+TimeoutStartSec=60s
+
+# Only kill the main process; ExecStop handles the rest.
+KillMode=process
+
+# ── Failure reporting ──────────────────────────────────────────────────────
+# There is deliberately NO SuccessExitStatus= here. Declaring an exit code a
+# success to stop `mc serve`'s config refusals from restart-looping would
+# silence genuine crashes with it — a JVM that dies of a real fault exits
+# non-zero too, and the unit would go inactive with Result=success while
+# Restart=on-failure never fired. Anything watching would be told the server
+# stopped on purpose.
+#
+# `mc serve` instead exits 78 (EX_CONFIG, sysexits(3)) for operator-fixable
+# problems, which keeps the two cases distinguishable:
+#
+#   exit 0    clean shutdown             → inactive, no restart
+#   exit 78   misconfiguration           → failed, NOT restarted (see below)
+#   anything  crash, OOM-kill, JVM abort → failed, restarted after RestartSec
+#
+# 78 still marks the unit failed, which is the point: the problem is real and
+# should be visible to `systemctl status`. RestartPreventExitStatus is what
+# stops it looping every 10 s over something no restart can fix.
+Restart=on-failure
+RestartSec=10s
+RestartPreventExitStatus=78
+
+[Install]
+WantedBy=multi-user.target

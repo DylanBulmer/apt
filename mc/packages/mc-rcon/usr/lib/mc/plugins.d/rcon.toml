@@ -1,0 +1,37 @@
+# mc plugin manifest — see the plugin-development skill for the contract.
+abi  = 1
+name = "rcon"
+bin  = "/usr/libexec/mc/mc-rcon"
+
+[[commands]]
+name  = "rcon"
+about = "Open an RCON console, or run one command against the server"
+
+# The baseline console: RCON is the only channel every supported Minecraft
+# version has. Priority 10 leaves room beneath for a fallback and above for
+# `mc-mgmt`, which speaks the management protocol on 1.21.9+ and takes over
+# whenever its probe succeeds.
+[[providers]]
+kind     = "console"
+name     = "rcon"
+priority = 10
+
+# Warn players and count them down before the server stops. Never fatal: a
+# shutdown must not abort because a warning could not be delivered.
+[[hooks]]
+event = "pre-stop"
+
+# Hold the world still for the duration of an archive.
+[[hooks]]
+event = "pre-backup"
+
+# Turn saving back on. Runs whether or not the backup succeeded.
+[[hooks]]
+event = "post-backup"
+
+# Provision the password and switch RCON on for a newly installed server.
+[[hooks]]
+event = "post-install"
+
+[[hooks]]
+event = "post-upgrade"

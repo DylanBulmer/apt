@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop    minecraft 2>/dev/null || true
+            systemctl disable minecraft 2>/dev/null || true
+            systemctl daemon-reload     2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,388 @@
+.\" Hand-written. The event list and the ABI number must match
+.\" mc_common::plugin — a tier-1 test asserts they do.
+.TH MC-PLUGINS 5 "" "mc" "mc manual"
+.SH NAME
+mc-plugins \- plugin manifest format for mc
+.SH SYNOPSIS
+.I /usr/lib/mc/plugins.d/*.toml
+.SH DESCRIPTION
+A plugin is a
+.B .deb
+that drops a TOML manifest into
+.I /usr/lib/mc/plugins.d/
+and an executable into
+.IR /usr/libexec/mc/ .
+.BR mc (1)
+reads every manifest in that directory at startup, in filename order, and
+invokes the executable across a process boundary.
+.PP
+Out of process, rather than a shared library, because Rust has no stable ABI: a
+.BR dlopen -based
+plugin would have to be rebuilt in lockstep with core, which defeats the point
+of "adding a capability is installing another package". One fork and exec per
+invocation is nothing at command-line latency.
+.PP
+A manifest that fails to load is reported, never silently skipped \(em
+.B mc plugins
+prints the problem. A plugin whose command was expected and has vanished is
+exactly the case a silent skip would hide.
+.SH FIELDS
+.TP
+.B abi
+.RI ( "integer, required" )
+The plugin interface version this plugin was built against. Core implements
+.BR 1 .
+A manifest declaring anything else is refused by name, and its commands and
+hooks do not run.
+.IP
+This replaces a versioned
+.BR Depends: .
+The arrangement it replaced had a plugin's postinst source another package's
+private shell library, so a missed version-floor bump left dpkg configuring the
+plugin against a library without the function it called. Core reads the number
+instead.
+.TP
+.B name
+.RI ( "string, required" )
+The plugin's name. Also the naming rule for its manual page:
+.B mc man <command>
+looks for
+.BI mc- name (1),
+so a plugin named
+.B backup
+must ship
+.BR mc-backup (1).
+.TP
+.B bin
+.RI ( "path, required" )
+The executable. Conventionally
+.IR /usr/libexec/mc/mc-<name> ,
+which is deliberately not on
+.BR PATH :
+it is invoked by core and is not a command surface anyone should script
+against.
+.SH "[[commands]]"
+One table per subcommand contributed. Only a registered name is dispatchable \(em
+resolving to some executable is not sufficient, or an internal entry point
+would become callable from the command line, skipping the guards, the lock and
+the configuration loading its real entry point performs.
+.TP
+.B name
+The subcommand as typed:
+.B name = "backup"
+makes
+.B mc backup
+work.
+.TP
+.B about
+One-line description, shown by
+.BR "mc plugins" .
+.PP
+Core invokes it as:
+.PP
+.RS
+.nf
+.RI < bin "> command <" name "> [args...]"
+.fi
+.RE
+.PP
+The plugin enforces its own privilege guard. Core does not refuse on its behalf:
+only the plugin knows whether the subcommand reads or writes.
+.SH "[[hooks]]"
+One table per lifecycle event.
+.TP
+.B event
+One of:
+.RS
+.TP
+.B pre-start
+Before the unit is started.
+.TP
+.B pre-stop
+Before the server is told to stop.
+.TP
+.B pre-backup
+Before a backup archives the world.
+.TP
+.B post-backup
+After a backup, whether or not it succeeded.
+.TP
+.B post-install
+After a server is installed.
+.TP
+.B post-upgrade
+After a server is upgraded.
+.RE
+.IP
+An unrecognised event is a manifest error, not a silent no-op: a hook declared
+as
+.B pre-stopp
+would otherwise install cleanly and never run.
+.TP
+.B fatal
+.RI ( "boolean, default " false )
+Whether a non-zero exit aborts the operation around it. Contributing a step
+must not become a way to break the core path, so this is off unless asked for.
+.IP
+.B pre-stop
+and
+.B post-backup
+may never be fatal, and a manifest that says otherwise is refused at load time.
+A shutdown does not stop because a warning could not be delivered, and a
+backup's save-on must run even after the archive failed \(em a live server left
+with saving disabled loses everything since the last flush.
+.PP
+Core invokes a hook as:
+.PP
+.RS
+.nf
+.RI < bin "> hook <" event ">"
+.fi
+.RE
+.PP
+with a JSON payload on standard input. Every hook registered for an event runs,
+in filename order, even when an earlier one failed: they are independent
+contributions, not a pipeline.
+.SS "Re-entrancy"
+A hook may run
+.BR mc ,
+and that re-entry dispatches hooks of its own. Nothing inside a single process
+can see a chain that has already crossed a process boundary, so core carries the
+nesting state in the environment \(em
+.B MC_HOOK_DEPTH
+and
+.B MC_HOOK_CHAIN
+\(em which every descendant inherits.
+.PP
+Core refuses to dispatch a hook when either bound is reached:
+.TP
+.I a cycle
+The same
+.IB plugin : event
+pair is already active further up the chain. This is the shorter and likelier
+failure: two plugins whose hooks trigger each other's events ping-pong forever
+at a depth that never reaches the limit.
+.TP
+.I depth
+Dispatch is already
+.B 2
+levels deep. One level is the normal case and two covers a hook that
+legitimately drives a core operation with hooks of its own \(em a
+.B post-install
+that takes a backup. Deeper is a plugin calling back into the operation that
+invoked it, which does not terminate on its own.
+.PP
+.B A refusal is a warning and a skip, never a failure,
+for every event including one that permits a fatal hook. Aborting a shutdown or
+an install because a plugin called back into it leaves the operator worse off
+than the missing step does. The warning names the plugin, the event and the
+chain, so what looped is readable from the journal.
+.PP
+A hook that has not exited within
+.B 360 seconds
+is killed, reaped and reported as failed. The bound is set by the stop path: the
+unit's
+.B TimeoutStopSec=380s
+covers a worst case of 358 s, of which the elected console's
+.B pre-stop
+hook is 355 s once the 3-second election outside it is subtracted. The deadline
+has to clear a legitimate countdown and still bound a hook that black-holes, so
+that one costs an overrun rather than every second systemd has before it
+SIGKILLs the JVM mid-chunk-flush.
+.SH "[[providers]]"
+One table per capability the plugin offers core, beyond a command and a hook.
+.TP
+.B kind
+.RB ( source " | " console )
+.B source
+populates a staging directory from a file the operator names.
+.B console
+talks to a server that is already running.
+.IP
+An unrecognised kind is
+.I reported and ignored,
+not refused: the plugin's commands, hooks and understood providers still work.
+A plugin built against a newer core must be able to contribute the parts this
+core understands, or every future kind becomes a flag day for the whole plugin
+set. The report is what keeps
+.B kind = "sauce"
+from being silently inert \(em
+.B mc plugins
+prints it.
+.TP
+.B name
+The provider's name, shown by
+.BR "mc plugins" .
+.TP
+.B extensions
+.RI ( source )
+File extensions claimed, without the dot.
+.B mc install pack.mrpack
+routes to whichever provider claims
+.BR mrpack .
+.TP
+.B priority
+.RI ( console ", integer, default " 0 )
+Which console wins when more than one is installed. Higher is better. The
+shipped consoles sit at 10
+.RB ( mc-rcon )
+and 20
+.RB ( mc-mgmt ),
+so a new one that should take precedence declares a larger number rather than
+renumbering anything.
+.SS "The source protocol"
+Core invokes a source provider as:
+.PP
+.RS
+.nf
+.RI < bin "> provide <" pack "> <" staging-dir ">"
+.fi
+.RE
+.PP
+The provider populates the staging directory and prints one JSON object on
+standard output \(em
+.BR server_type ,
+.B minecraft_version
+and
+.B java_version
+\(em with everything human-facing on standard error, so core can parse the
+answer without stripping progress lines.
+.SS "The console election"
+Core does not choose a console by name. It asks each one whether it can talk to
+.I this
+server, right now:
+.PP
+.RS
+.nf
+.RI < bin "> console probe"
+.fi
+.RE
+.PP
+.B The answer is the exit status and nothing else.
+Exit 0 means usable. Anything else \(em a non-zero exit, a missing binary, a
+protocol the server's version does not implement, an endpoint that is switched
+off \(em means no, and core tries the next console down. A probe that has not
+exited within
+.B 3 seconds
+is killed, reaped and counted as no. The bound is not decoration: election runs
+on the shutdown path, and a black-holed endpoint must cost a couple of seconds
+rather than the unit's whole
+.BR TimeoutStopSec= .
+.PP
+The elected console is the highest-priority one that answers. It is resolved at
+most once per process and only for the events that need it. A console that
+prints on its probe puts a line in the journal every time the server stops, so
+a console that is simply switched off says nothing.
+.PP
+.B "Only the elected console runs"
+.BR pre-stop ", " pre-backup " and " post-backup .
+Two consoles counting down announce a shutdown that already has a schedule, and
+a second save-on can restore saving halfway through the other's archive. A
+console that lost stands down for those events; a plugin that declares no
+console provider is never suppressed.
+.PP
+.B "Every installed console runs"
+.BR post-install " and " post-upgrade ,
+elected or not, so each keeps its own credentials provisioned. Losing an
+election must not leave a machine with nothing that works the day the winner's
+probe starts failing.
+.PP
+.B mc plugins
+names the outcome:
+.PP
+.RS
+.nf
+console:  mgmt (priority 20) \(em elected
+console:  rcon (priority 10) \(em standing down
+console:  rcon (priority 10) \(em not answering
+.fi
+.RE
+.SH "WHAT MUST NOT MOVE INTO A PLUGIN"
+The lock, the EULA gate, ownership of
+.IR /opt/minecraft ,
+and the system-managed keys of
+.IR server.properties .
+A plugin contributes a
+.IR step ;
+core keeps the ordering that makes the step safe. That is why a modpack
+provider only fetches and stages: core re-applies the RCON keys afterwards, so
+a pack cannot enable RCON with a password of its choosing.
+.SH EXAMPLE
+.nf
+.RS
+abi  = 1
+name = "hello"
+bin  = "/usr/libexec/mc/mc\-hello"
+
+[[commands]]
+name  = "hello"
+about = "Say hello"
+
+[[hooks]]
+event = "post\-install"
+.RE
+.fi
+.PP
+Installed as a
+.B .deb
+that depends on
+.BR mc-server ,
+alongside
+.I /usr/share/man/man1/mc-hello.1
+so that
+.B mc man hello
+has something to open.
+.SH ENVIRONMENT
+Set by core on every invocation \(em command, hook, probe and source provider
+alike. Paths travel here rather than being compiled into each plugin, so a test
+can point core and its plugins at the same temporary root.
+.TP
+.B MC_ABI
+The plugin interface version core implements.
+.TP
+.B MC_ROOT
+The root every other path derives from.
+.TP
+.B MC_BASE
+The server directory, normally
+.IR /opt/minecraft .
+.TP
+.B MC_CONFIG
+The configuration directory, normally
+.IR /etc/minecraft .
+.TP
+.B MC_USER
+The service account the server runs as.
+.TP
+.B MC_HOOK_DEPTH
+How many levels of hook dispatch are already active. An integer; absent means
+zero.
+.TP
+.B MC_HOOK_CHAIN
+The
+.IB plugin : event
+pairs already active, comma-separated and outermost first \(em
+.BR mgmt:pre-stop,backup:pre-backup .
+.PP
+.B The two hook variables are inherited, never reset.
+Core passes them through unchanged to anything that is not itself a hook, and a
+plugin must pass them on to anything it runs. Clearing them, or dropping them
+while building a child's environment, hands the next process a fresh budget
+simply for shelling out to
+.BR mc ,
+which is exactly the loop the guard exists to stop.
+.SH FILES
+.TP
+.I /usr/lib/mc/plugins.d/
+Manifests. Read in filename order, which is what makes hook order the same on
+every machine.
+.TP
+.I /usr/libexec/mc/
+Plugin executables.
+.SH SEE ALSO
+.BR mc (1),
+.BR mc-config (5),
+.BR mc-rcon (1),
+.BR mc-mgmt (1),
+.BR mc-backup (1),
+.BR mc-mrpack (1)

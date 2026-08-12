@@ -5,22 +5,14 @@ on:
     branches: [main]
     tags: ['v*']
     paths:
-      - packages/**
-      - scripts/**
-      - repo/conf/**
-      - Dockerfile
-      - nginx.conf
-      - k8s/**
+      - mc/**
+      - apt/**
       - .github/workflows/publish.yml
   pull_request:
     branches: [main]
     paths:
-      - packages/**
-      - scripts/**
-      - repo/conf/**
-      - Dockerfile
-      - nginx.conf
-      - k8s/**
+      - mc/**
+      - apt/**
       - .github/workflows/publish.yml
   workflow_dispatch:
     inputs:
@@ -41,14 +33,60 @@ permissions:
   actions: read
 
 jobs:
+  # ── Test ────────────────────────────────────────────────────────────────────
+  # Gates everything below. Publishing on `main` must not proceed on a red
+  # suite: reprepro regenerates its trees on every run, so a bad package that
+  # reaches the pool is served immediately and cannot be withdrawn by reverting
+  # — only by publishing a higher version.
+  test:
+    if: ${{ inputs.republish != true }}
+    name: Test
+    runs-on: ubuntu-latest
+    # The cargo workspace is mc/, not the repository root: the root holds the
+    # product and the apt repository that publishes it side by side.
+    defaults:
+      run:
+        working-directory: mc
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the version; this action honours it, so CI and
+      # a developer's machine compile with the same rustc and the same lints.
+      - uses: dtolnay/rust-toolchain@stable
+      # Neither action honours `defaults.run.working-directory`, so both are
+      # pointed at the workspace explicitly. Without this the cache key is
+      # computed from a Cargo.lock that is not there, and every run is a miss.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mc
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # Tiers 1-3: unit, integration and the security regression corpus. No
+      # Docker, no root, no network.
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      # Tier 4: the container suites. Needs a real dpkg and a real root, so it
+      # runs in Docker even here.
+      - name: Container suites
+        run: tests/run.sh
+
   # ── Build ───────────────────────────────────────────────────────────────────
   # One leg per Debian architecture, on a native runner of that architecture.
-  # Building natively avoids a cross-compilation toolchain for mc-rcon (C).
+  # Building natively avoids a cross-compilation toolchain, and — more
+  # importantly — links each binary against the glibc of the architecture it
+  # will run on.
   #
-  # mc-server is `Architecture: all`, so it is built on the amd64 leg ONLY —
-  # building it on every leg would produce identical .deb files that reprepro
-  # would then be asked to include twice.
+  # EVERY PACKAGE IS Architecture-SPECIFIC NOW. The shell mc-server was
+  # `Architecture: all` and was built on the amd64 leg only; all four packages
+  # now ship compiled binaries, so each leg builds all five.
   build:
+    needs: [test]
     if: ${{ inputs.republish != true }}
     strategy:
       fail-fast: false
@@ -56,41 +94,55 @@ jobs:
         include:
           - runner: ubuntu-latest
             arch: amd64
-            build_arch_all: true
           - runner: ubuntu-24.04-arm
             arch: arm64
-            build_arch_all: false
 
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: mc
 
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mc
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential rsync
+          sudo apt-get install -y --no-install-recommends dpkg-dev build-essential
 
-      - name: Build arch-independent packages
-        if: ${{ matrix.build_arch_all }}
-        run: bash scripts/build.sh mc-server
+      - name: Build packages
+        run: |
+          for pkg in mc-server mc-rcon mc-backup mc-mrpack mc-mgmt; do
+            bash scripts/build.sh "$pkg"
+          done
 
-      - name: Build architecture-specific packages
-        run: bash scripts/build.sh mc-rcon
-
-      - name: Verify built package architectures
+      - name: Verify built package metadata
         run: |
           for deb in dist/*.deb; do
             echo "--- $deb"
-            dpkg-deb --field "$deb" Package Version Architecture
+            dpkg-deb --field "$deb" Package Version Architecture Depends
+            # ${shlibs:Depends} is a debhelper variable that nothing substitutes
+            # under plain dpkg-deb. Shipped literally it produces a package apt
+            # refuses to install, and the .deb builds and uploads perfectly
+            # happily — so it is checked here rather than discovered by a user.
+            if dpkg-deb --field "$deb" Depends | grep -q '\${'; then
+              echo "::error::$deb has an unsubstituted dependency variable"
+              exit 1
+            fi
           done
 
       - name: Upload package artifacts
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.arch }}
-          path: dist/*.deb
+          path: mc/dist/*.deb
           if-no-files-found: error
           retention-days: 90
 
@@ -98,9 +150,14 @@ jobs:
   # Runs once. Collects every architecture's .deb files, signs and indexes them
   # with reprepro, then builds and pushes the multi-arch nginx image.
   publish:
-    needs: [build]
-    # `always()` so the republish path (which skips `build` entirely) still runs.
-    if: ${{ always() && needs.build.result != 'failure' && needs.build.result != 'cancelled' }}
+    needs: [test, build]
+    # `always()` so the republish path (which skips both jobs entirely) still
+    # runs; the explicit result checks are what stop a red suite from reaching
+    # the pool.
+    if: >-
+      ${{ always()
+          && needs.test.result != 'failure' && needs.test.result != 'cancelled'
+          && needs.build.result != 'failure' && needs.build.result != 'cancelled' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -117,7 +174,7 @@ jobs:
         with:
           pattern: packages-*
           merge-multiple: true
-          path: dist
+          path: mc/dist
 
       # The reprepro pool/dists trees are gitignored and regenerated on every
       # run, so "republish without rebuilding" means: reuse the .deb files
@@ -131,6 +188,8 @@ jobs:
           run_ids=$(gh run list \
             --workflow publish.yml \
             --status success \
+            --branch main \
+            --event push \
             --limit 20 \
             --json databaseId --jq '.[].databaseId')
           if [ -z "$run_ids" ]; then
@@ -159,9 +218,9 @@ jobs:
           fi
 
           echo "Reusing packages from run ${run_id}"
-          mkdir -p dist
-          find artifacts -name '*.deb' -exec cp -v {} dist/ \;
-          if [ -z "$(find dist -name '*.deb' -print -quit)" ]; then
+          mkdir -p mc/dist
+          find artifacts -name '*.deb' -exec cp -v {} mc/dist/ \;
+          if [ -z "$(find mc/dist -name '*.deb' -print -quit)" ]; then
             echo "::error::Run ${run_id} yielded no .deb files after extraction."
             exit 1
           fi
@@ -177,15 +236,15 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           shopt -s nullglob
-          debs=(dist/*.deb)
+          debs=(mc/dist/*.deb)
           if [ ${#debs[@]} -eq 0 ]; then
             echo "::error::No .deb files available to publish."
             exit 1
           fi
           for deb in "${debs[@]}"; do
-            bash scripts/publish.sh "$deb"
+            bash apt/scripts/publish.sh "$deb"
           done
-          reprepro -b repo list stable
+          reprepro -b apt list stable
 
       - name: Compute image build metadata
         if: github.event_name != 'pull_request'
@@ -231,7 +290,9 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
         with:
-          context: .
+          # apt/ is the context: it holds the Dockerfile, the nginx config, the
+          # public key, and the dists/ and pool/ trees reprepro just generated.
+          context: apt
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

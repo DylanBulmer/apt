@@ -1,0 +1,8 @@
+# The image is built with apt/ as its context and serves only the generated
+# reprepro trees, so everything else is excluded — including conf/ and db/,
+# which hold reprepro's own state and have no business in a public web root.
+conf/
+db/
+scripts/
+k8s/
+.dockerignore

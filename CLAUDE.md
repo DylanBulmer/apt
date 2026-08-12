@@ -4,15 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Read the skills first
 
-Two skills in `.claude/skills/` carry most of the operational detail, and using
-them is much cheaper than rediscovering it:
+Four skills in `.claude/skills/` carry most of the operational detail, and
+using them is much cheaper than rediscovering it:
 
-- **`file-structure`** — where every file lives, which file defines which shell
-  function, and recipes for reading one function instead of a 1600-line file.
-  Use it *before* `ls`/`find`/broad `grep`.
-- **`testing`** — how to run and write tests, plus a catalogue of bugs this
-  project has hit more than once. Several are ways a test can pass *vacuously*.
-  Use it before writing a test or calling a change verified.
+- **`file-structure`** — which crate owns which concern, how `mc/crates/` and
+  `packages/` relate, where a change belongs, and cargo-oriented recipes for
+  reading one function instead of a whole file. Use it *before* `ls`/`find`/
+  broad `grep`.
+- **`testing`** — the four test tiers and how to pick one, the four injectable
+  seams, and a catalogue of bugs this project has hit more than once. Several
+  are ways a test can pass *vacuously*. Use it before writing a test or calling
+  a change verified.
+- **`plugin-development`** — the ABI-1 contract: manifest schema, hook events,
+  the source-provider protocol, and what must stay in core. Use it before adding
+  a subcommand, a hook, or a package.
+- **`git-safety`** — what each git operation here destroys or publishes: why
+  `git checkout -- <file>` has no undo, why a new package is entirely untracked,
+  and why pushing to `main` signs and indexes packages into the live repository.
+  Use it before any command that discards, moves, resets, stashes, cleans,
+  commits or pushes.
 
 The `README.md` is the user-facing manual (install, configure, troubleshoot).
 Don't restate it here; do check it for drift when behaviour changes.
@@ -20,85 +30,105 @@ Don't restate it here; do check it for drift when behaviour changes.
 ## Commands
 
 ```sh
-bash scripts/build.sh mc-server     # → dist/*.deb (compiles src/ first if present)
-bash scripts/build.sh mc-rcon       # needs dpkg-deb, i.e. Debian or the test container
+cd mc                           # the cargo workspace root
+cargo test --workspace          # tiers 1-3   ~1 s, no Docker, no root, no network
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all --check
 
-tests/run.sh                        # unit + integration      ~30 s, no network
-tests/run.sh --all                  # + install-type matrix   ~2 min, hits real APIs
-tests/run.sh --unit                 # unit only
-tests/run.sh unit/ports             # one suite (path under tests/suites, no .sh)
-tests/run.sh --shell                # container shell, packages installed
+mc/tests/run.sh                 # tier 4 container suites   ~1 min
+mc/tests/run.sh --all           # + the live install matrix ~3 min, real APIs
 
-bash scripts/publish.sh dist/mc-server_<ver>_all.deb   # needs reprepro + the private key
+cargo run -p xtask -- man /tmp/man1           # render mc.1; read with `man /tmp/man1/mc.1`
+
+bash mc/scripts/build.sh mc-server            # → mc/dist/*.deb (needs Debian)
+bash apt/scripts/publish.sh mc/dist/<pkg>.deb # needs reprepro + the signing key
 ```
 
-Tests require Docker and only run there. Syntax checks are fine anywhere:
+`mc/tests/run.sh` and both scripts resolve their own roots, so they run from
+anywhere; `cargo` needs `mc/`. Cargo lives at `~/.cargo/bin`; the toolchain is
+pinned by `mc/rust-toolchain.toml`. Publishing is normally CI's job — pushing to
+`main` runs the test gate, builds per architecture, and indexes automatically.
 
-```sh
-for f in packages/mc-server/usr/lib/mc/*.sh packages/mc-server/usr/bin/mc \
-         packages/mc-server/DEBIAN/postinst; do bash -n "$f" && echo "OK $f"; done
-```
+## Repository layout
 
-Publishing is normally CI's job — pushing to `main` with changes under
-`packages/**` builds, signs, and indexes automatically.
+Two components. **`mc/`** is the product: the cargo workspace (`crates/`), the
+Debian packaging trees (`packages/`), its tests and its build script. Three
+crates ship in no package: `mc-common` and `mc-console` are libraries linked
+statically by the binaries that need them, and `xtask` is build-time tooling.
+**`apt/`** is the distribution: reprepro config, the signing key, `publish.sh`,
+and the nginx image that serves the repository — `apt/` is that image's whole
+build context, which is why its `COPY` paths carry no prefix.
 
 ## Architecture
 
-Each `packages/<name>/` directory **mirrors the target filesystem root**:
-`packages/mc-server/usr/bin/mc` installs to `/usr/bin/mc`. `DEBIAN/` is control
-metadata and is the one directory that is not a real install path.
+**Five packages joined by a plugin contract.** `mc-server` ships the dispatcher
+(`/usr/bin/mc`); `mc-rcon`, `mc-mgmt`, `mc-backup` and `mc-mrpack` each drop a
+TOML manifest into `/usr/lib/mc/plugins.d/` and an executable into
+`/usr/libexec/mc/`. Core discovers manifests at startup and invokes plugins
+across a process boundary — `<bin> command <name>` for a subcommand,
+`<bin> hook <event>` with JSON on stdin for a hook.
 
-**Two packages joined by a plugin contract.** `mc-server` ships the dispatcher
-(`/usr/bin/mc`) and the library (`/usr/lib/mc/{lib,common}.sh`). `mc-rcon` drops
-a file into `/usr/lib/mc/commands.d/` and calls `mc_register_command`. The
-dispatcher routes *only* registered names — resolving to a `cmd_*` function is
-necessary but not sufficient, or internal helpers become callable from the
-command line, skipping the `require_root` / `acquire_lock` / `load_config`
-their real entry points perform. `mc-rcon`'s postinst also sources `mc-server`'s
-`common.sh`, which is why its `Depends:` carries a **version floor** — raise it
-whenever the plugin starts using a function older mc-server versions lack.
+**The console is elected, never named.** `mc-rcon` (RCON, every version) and
+`mc-mgmt` (the management protocol, 1.21.9+) both declare
+`[[providers]] kind = "console"` with a `priority`; core elects the highest one
+whose `<bin> console probe` exits 0 within 3 seconds — anything else, including
+a hang, is "no" and the next one down takes over. Installing both is the
+intended arrangement, and nothing in core knows either name. Only the elected
+console runs `pre-stop`, `pre-backup` and `post-backup`, because two countdowns
+are worse than one and a second save-on can restore saving mid-archive; every
+installed console runs `post-install` and `post-upgrade`, so losing an election
+never leaves a machine with nothing that works. An unknown provider `kind` is
+reported by `mc plugins` and ignored rather than refusing the manifest, so a
+future kind is not a flag day. `TimeoutStopSec=380s` covers the probe budget on
+top of the countdown.
 
-**The `common.sh` / `lib.sh` split is a privilege boundary, not organisation.**
-`common.sh` is sourced by `lib.sh` (root, via `mc`) *and* by `start.sh`,
-`stop.sh`, `reload.sh`, which systemd runs unprivileged as the `minecraft` user
-under `ProtectSystem=strict`. So `common.sh` must be definitions only — no
-writes, no network, no `systemctl`, safe under `set -euo pipefail`, and no
-dependency on `lib.sh`'s colourising output helpers. Anything both sides need
-belongs there; anything root-only belongs in `lib.sh`.
+**Only a registered name is dispatchable.** Resolving to *some* executable is
+necessary but not sufficient, or an internal entry point becomes callable from
+the command line, skipping the guards, the lock and the config loading its real
+entry point performs.
 
-**Two kinds of configuration, split by what they describe.** `/etc/minecraft/`
-is *mc's* config — how to run the server: build, Java, heap, JVM flags, backup
-policy, layered `defaults.conf` (a conffile) → `server.conf` (generated by
-install/upgrade), loaded by `load_config`. `/opt/minecraft/server.properties` is
-*the server's* config — what the game is: port, seed, MOTD, difficulty, RCON.
-The JVM reads and rewrites that file, so mc keeps no copy of anything in it:
-read with `mc_sprop_get` / `mc_rcon_port` at the point of use, and write the
-RCON keys only through `set_rcon_enabled`. Preserve that boundary — a game
-setting mirrored into `server.conf` can only go stale.
+**The `abi` field replaces a versioned `Depends:`.** The old arrangement had
+`mc-rcon`'s postinst source another package's private shell library, so a missed
+version-floor bump left dpkg configuring the plugin against a library without
+the function it called — exit 127, half-installed package. Core now reads the
+number and refuses by name. Bump `mc_common::plugin::ABI` only for a genuinely
+breaking contract change; it disables every plugin that has not been rebuilt.
 
-**systemd owns the lifecycle; `mc` drives it.** `minecraft.service` points
-`ExecStart`/`ExecStop`/`ExecReload` at the three scripts, so `systemctl start
-minecraft` bypasses the CLI entirely — which is why the EULA and
-`server.properties` gates live in `start.sh` rather than in `cmd_start`. The
-exit-code policy is load-bearing: `start.sh` exits **78** (`EX_CONFIG`) for
-operator-fixable problems, which the unit maps to `RestartPreventExitStatus=` so
-it fails visibly without restart-looping, while every other non-zero exit is a
-genuine crash that does restart. `mc start` then polls, because `Type=simple`
-reports success the moment the process forks.
+**`mc serve` / `mc shutdown` / `mc reload` are a privilege boundary.** They are
+systemd's `ExecStart=`/`ExecStop=`/`ExecReload=` and run as the `minecraft` user
+under `ProtectSystem=strict`. They are declared `Requirement::ServiceAccount` in
+`cli.rs`, must never take a root guard, and must write nothing outside
+`MC_BASE`. A root guard on any of them means the server never starts, with a
+failure that reads as a config problem rather than a permission one. Two tests
+assert this; do not weaken either.
 
-**One EXIT trap, ever.** `lib.sh` has a cleanup registry
-(`mc_cleanup`, `cleanup_register_dir`, `_MC_CLEANUP_SAVE_ON`). Register duties
-there; never call `trap` at a call site. An `EXIT` trap set there silently
-replaces this one, and a `RETURN` trap is not scoped to the function that sets
-it — it fires again in the *caller*, when its locals are gone.
+**Two kinds of configuration, split by what they describe.**
+`/etc/minecraft/config.toml` is *mc's* — how to run the server: build, Java,
+heap, backup policy. `/opt/minecraft/server.properties` is *the server's* —
+port, seed, MOTD, difficulty, RCON. The JVM reads and rewrites the second, so mc
+keeps no copy of anything in it: read with `properties::Properties::load` at the
+point of use, and write the RCON keys only through `mc-rcon`. Preserve that
+boundary — a game setting mirrored into `config.toml` can only go stale.
 
-**Two paths take untrusted input as root.** `.mrpack` manifests and a pack's own
-`server.properties` are attacker-controlled: versions, file paths, and download
-URLs are validated before use; anything reaching an arithmetic context is forced
-to digits (bash performs command substitution inside array subscripts there, and
-`set -u` does not save you); properties are rewritten by an in-shell parser
-rather than `sed`. The system-managed keys are always re-applied after a merge so
-a pack cannot enable RCON with a password of its choosing.
+**systemd owns the lifecycle; `mc` drives it.** `systemctl start minecraft`
+bypasses the CLI entirely, which is why the EULA and `server.properties` gates
+live in `mc serve` rather than in `mc start`. The exit-code policy is
+load-bearing: `mc serve` exits **78** (`EX_CONFIG`) for operator-fixable
+problems, which the unit maps to `RestartPreventExitStatus=` so it fails visibly
+without restart-looping, while every other non-zero exit is a genuine crash that
+does restart. `mc start` then polls *and settles*, because `Type=simple` reports
+success the moment the process forks.
+
+**Two paths take untrusted input as root.** A `.mrpack` manifest and a backup
+archive are attacker-controlled: versions, file paths and URLs are validated
+before use, archive members are checked by *type* as well as by name (a hardlink
+to `/etc/shadow` passes every name check and then meets `chown -R`), and the
+system-managed keys of `server.properties` are re-applied after any merge so a
+pack cannot enable RCON with a password of its choosing.
+
+**RAII replaces the cleanup registry.** `lock::LockGuard` and `staging::Staging`
+release on every exit path including `?`. Do not add a global registry or an
+`atexit`; if something needs unwinding, give it a `Drop`.
 
 ## Conventions
 
@@ -107,20 +137,44 @@ read one before changing the code it guards, and match the density when adding
 code. They describe the code that follows, never what it replaced: no "used
 to", no migration notes.
 
-**A new `mc` subcommand touches four places:** `cmd_*` in `lib.sh`, the case in
-`usr/bin/mc`, `etc/bash_completion.d/mc`, and `usage`.
+**Tests are named after the property they protect.** `a_pack_cannot_choose_the_
+rcon_password`, not `test_merge_2`. `grep -rn "fn a_\|fn the_" crates/` should
+read as a list of promises.
 
-**Never hardcode runtime paths** — `MC_BASE`, `MC_CONFIG`, `SERVER_CONF`,
-`PASSWD_FILE` and friends are defined once in `common.sh`.
+**A new `mc` subcommand touches three places:** the `Command` variant in
+`cli.rs`, its arm in `Command::requirement()`, and a handler in `commands/`.
+Completions and `mc(1)`'s command list are both generated from clap, so neither
+can go stale. A new *capability* should usually be a plugin instead — see the
+`plugin-development` skill.
+
+**Manual pages are half generated, half prose, and the split is deliberate.**
+`mc.1`'s SYNOPSIS and COMMANDS come from the clap tree via `cargo run -p xtask
+-- man`; its prose sections are raw roff in `crates/mc/man/`. Everything else —
+`mc-config(5)`, `mc-plugins(5)`, and one page per plugin — is hand-written under
+`packages/<name>/usr/share/man/`, which is where a file that is not compiled
+belongs. `mc man <command>` resolves a plugin command through the registry to
+`mc-<plugin name>(1)`, so **a plugin's page must be named after the plugin and
+ship in the plugin's own package**; a tier-1 test asserts that, and others check
+the hook events, the ABI number and every config key against the code. Write the
+page in the same commit as the command.
+
+**Never hardcode a runtime path.** Everything derives from `Paths`, which is a
+struct rather than a set of constants so tests can point it at a temp root via
+`MC_ROOT`. The same applies inside plugins: `Paths::from_env()`.
+
+**The workspace denies `unwrap`, `expect`, `panic` and indexing.** A panic in
+`mc serve` is an outage whose cause is an address in the journal. Tests are
+exempt (`mc/clippy.toml`), but integration test crates under `tests/` need the
+allow at crate level — the config option only covers `#[cfg(test)]` modules.
 
 **Bump `Version:` in `DEBIAN/control` in the same commit as the change.** CI
-publishes on every push touching `packages/**` and reprepro regenerates per run,
-so a change without a bump republishes the same version number with different
-contents — and anyone who installed the earlier build is pinned to it forever,
-because apt only upgrades on a higher version.
+publishes on every push touching the build inputs and reprepro regenerates per
+run, so a change without a bump republishes the same version number with
+different contents — and anyone who installed the earlier build is pinned to it
+forever, because apt only upgrades on a higher version.
 
 **`server.properties` is `minecraft:minecraft` 0640, always.** It holds the RCON
 password, and 0640 is readable only because the owner is the service account. A
-root-owned copy is a silent failure: the JVM can neither read nor write it, comes
-up on compiled-in defaults, and generates a stray world beside the real one.
-Anything that writes it runs as `$MC_USER` or calls `sprop_secure` afterwards.
+root-owned copy is a silent failure: the JVM can neither read nor write it,
+comes up on compiled-in defaults, and generates a stray world beside the real
+one. Anything that writes it calls `properties::secure`.

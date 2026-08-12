@@ -1,0 +1,73 @@
+#!/bin/sh
+set -e
+
+MC_USER="minecraft"
+MC_BASE="/opt/minecraft"
+MC_BACKUP="/var/backups/minecraft"
+MC_CONFIG="/etc/minecraft"
+
+case "$1" in
+    configure)
+        if ! getent group "$MC_USER" >/dev/null 2>&1; then
+            groupadd --system "$MC_USER"
+        fi
+        if ! id "$MC_USER" >/dev/null 2>&1; then
+            useradd --system \
+                --gid "$MC_USER" \
+                --home-dir "$MC_BASE" \
+                --shell /usr/sbin/nologin \
+                --comment "Minecraft server manager" \
+                "$MC_USER"
+        fi
+
+        # Server data: owned by the service account, but NOT world-readable —
+        # server.properties inside it carries the RCON password.
+        mkdir -p "$MC_BASE"
+        chown "$MC_USER:$MC_USER" "$MC_BASE"
+        chmod 750 "$MC_BASE"
+
+        # Backups: root-only. Written by root and read only by root. It must not
+        # be owned or writable by $MC_USER — that account is the one exposed to
+        # untrusted mods, and owning this directory would let it pre-create the
+        # next predictable archive name as a symlink for root's writer to
+        # follow, or swap an archive between a restore's validation pass and its
+        # extraction.
+        mkdir -p "$MC_BACKUP"
+        chown root:root "$MC_BACKUP"
+        chmod 700 "$MC_BACKUP"
+
+        mkdir -p "$MC_CONFIG"
+        chown root:root "$MC_CONFIG"
+        chmod 755 "$MC_CONFIG"
+
+        # Assert owner AND mode on an existing server.properties, on every
+        # configure rather than only on upgrades. 0644 leaves the RCON password
+        # readable by every local user; root-owned 0640 is worse, because the
+        # JVM runs as $MC_USER and can then neither read nor write it, so the
+        # server comes up on compiled-in defaults and — if level-name was
+        # customised — generates a stray world beside the real one. Editing the
+        # file as root with a write-and-rename editor produces exactly that.
+        if [ -f "$MC_BASE/server.properties" ] && [ ! -L "$MC_BASE/server.properties" ]; then
+            chown "$MC_USER:$MC_USER" "$MC_BASE/server.properties"
+            chmod 640 "$MC_BASE/server.properties"
+        fi
+
+        # GATED ON /run/systemd/system, the canonical "systemd is the running
+        # init" test. Do NOT gate on `systemctl is-system-running`: that is a
+        # HEALTH check, non-zero for "degraded" — any machine with one unrelated
+        # failed unit — which would skip the reload. If minecraft.service were
+        # the failed unit that becomes self-sustaining.
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+
+        # NOT restarted here, deliberately. daemon-reload makes the new unit
+        # authoritative for the next start; a running server keeps the old one
+        # until it is restarted. Restarting during an unattended `apt upgrade`
+        # would drop players — and on a populated server the pre-stop hook
+        # spends five minutes counting them down first. Restart when you choose
+        # to: mc restart
+        ;;
+esac
+
+exit 0

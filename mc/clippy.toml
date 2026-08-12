@@ -1,0 +1,9 @@
+# The workspace denies unwrap/expect/panic/indexing in shipped code: a panic in
+# `mc serve` (systemd's ExecStart=) or in a maintainer script is an outage whose
+# cause is an address in the journal. Tests are the opposite case — a panic IS
+# the failure report, and routing every fixture through `?` would bury the
+# assertion being made.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

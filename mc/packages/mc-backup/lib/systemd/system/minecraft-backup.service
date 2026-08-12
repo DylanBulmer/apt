@@ -1,0 +1,25 @@
+[Unit]
+Description=Minecraft Server Backup
+After=network.target
+Documentation=https://apt.bulmer.dev
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/mc backup
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/backups/minecraft /run/minecraft
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+
+# Bounded so a wedged backup cannot hold the mc lock forever and block every
+# install, upgrade and restore behind it. Generous: a large modded world on slow
+# storage is minutes, not seconds.
+TimeoutStartSec=2h

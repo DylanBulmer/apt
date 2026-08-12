@@ -1,0 +1,9 @@
+Origin: apt.bulmer.dev
+Label: apt.bulmer.dev
+Suite: stable
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+ValidFor: 2w
+Description: APT packages by Dylan Bulmer
+SignWith: default

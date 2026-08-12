@@ -1,0 +1,311 @@
+.\" The `mc mgmt` subcommand. Named mc-mgmt.1 because `mc man mgmt` resolves a
+.\" plugin command to mc-<plugin name>(1) — see mc-plugins(5).
+.TH MC-MGMT 1 "" "mc" "mc manual"
+.SH NAME
+mc-mgmt \- management-protocol console and graceful shutdown for mc
+.SH SYNOPSIS
+.B mc mgmt status
+.br
+.B mc mgmt players
+.br
+.B mc mgmt say
+.I TEXT
+.br
+.B mc mgmt enable
+.br
+.B mc mgmt disable
+.br
+.B mc mgmt allowlist
+.RI [ "add \fR| \fPremove PLAYER" ]
+.br
+.B mc mgmt bans
+.RI [ "add \fR| \fPremove PLAYER" ]
+.br
+.B mc mgmt ip\-bans
+.RI [ "add \fR| \fPremove ADDRESS" ]
+.br
+.B mc mgmt operators
+.RI [ "add \fR| \fPremove PLAYER" ]
+.SH DESCRIPTION
+The
+.B mc-mgmt
+package adds the
+.B mc mgmt
+subcommand to
+.BR mc (1),
+and the lifecycle hooks that make a stop graceful and a backup consistent. It
+speaks the
+.IR "Minecraft Server Management Protocol" :
+JSON\-RPC 2.0 carried over a WebSocket, served by the game itself from Minecraft
+.B 1.21.9
+onwards.
+.PP
+It is a console in the sense
+.BR mc-plugins (5)
+means it \(em something that can talk to a server that is already running \(em
+and where it works it is the better one. Authentication is a bearer secret
+rather than a password every client shares, and the interface is typed methods
+returning typed results rather than command strings whose replies have to be
+parsed out of prose. A player list arrives as a list; a player name is sent as
+data, so there is no command string for a hostile name to break out of.
+.PP
+The protocol does not exist on older servers, and this plugin does not pretend
+otherwise. On anything below 1.21.9 it stands aside and
+.BR mc-rcon (1)
+does the work \(em see
+.B THE ELECTION
+below.
+.SH COMMANDS
+.TP
+.B mc mgmt status
+Report whether the management protocol is enabled, which endpoint it resolved,
+whether a connection and the bearer handshake actually succeed, and what the
+server says it is running. Reads only files the
+.B minecraft
+group can already read, so it needs no root.
+.IP
+This is the command to run when a console behaves unexpectedly: it distinguishes
+"the protocol is off", "the endpoint refuses connections" and "the secret is
+wrong", which the election collapses into a single silent "no".
+.TP
+.B mc mgmt players
+Print who is online, one name per line, on standard output so it can be piped.
+The list arrives as a list: there is no sentence to parse and no wording a
+server fork can vary. Needs root, or membership of the
+.B minecraft
+group.
+.TP
+.B mc mgmt say \fITEXT\fR
+Broadcast a message to everyone online, in chat rather than the action bar,
+which fades. The text is sent as a message field, not interpolated into a
+command. Needs root, or membership of the
+.B minecraft
+group.
+.TP
+.B mc mgmt enable
+Provision a secret if there is not one, pin a port, switch the management server
+on in
+.I server.properties
+with TLS off on loopback, and report the endpoint. Needs root.
+.IP
+The server is
+.I not
+restarted for you. It reads
+.I server.properties
+at startup, so a restart is required to apply the change \(em but on a populated
+server that is a five\-minute countdown, and when to spend it is the operator's
+call, not a side effect of a config command. Apply it with
+.BR "mc restart" .
+.TP
+.B mc mgmt disable
+Turn the management server off. The secret is left in place, so a later
+.B enable
+restores the same credential rather than invalidating every client that holds
+it. Needs root.
+.TP
+.B mc mgmt allowlist \fR[\fBadd\fR|\fBremove\fR \fIPLAYER\fR]
+List the allowlist, or add and remove a player. Needs root to change it.
+.TP
+.B mc mgmt bans \fR[\fBadd\fR|\fBremove\fR \fIPLAYER\fR]
+List player bans, or add and remove one. Needs root to change it.
+.TP
+.B mc mgmt ip\-bans \fR[\fBadd\fR|\fBremove\fR \fIADDRESS\fR]
+List address bans, or add and remove one. Needs root to change it.
+.TP
+.B mc mgmt operators \fR[\fBadd\fR|\fBremove\fR \fIPLAYER\fR]
+List operators, or grant and revoke. Needs root to change it.
+.PP
+Moderation is capability mc has never had over RCON, and it is here because the
+protocol makes it safe to offer: each of these takes a player as a structured
+value, so a name containing a quote, a section sign or a newline is a name and
+not a second command.
+.PP
+Game rules and the server settings the protocol also exposes are deliberately
+absent. Game rules are exactly where the protocol has broken compatibility
+between versions, and covering them means branching on a protocol version rather
+than calling a method.
+.SH "THE ELECTION"
+.B mc-mgmt
+and
+.BR mc-rcon (1)
+are both console providers, and installing both is the intended arrangement.
+Core does not choose between them by name. Each declares a
+.B priority
+in its manifest \(em RCON 10, this plugin 20 \(em and core elects the
+highest\-priority console that answers
+.B "<bin> console probe"
+with exit 0 inside three seconds. Anything else, including a server too old to
+serve the endpoint, is "no", and the next console down takes over.
+.PP
+Only the elected console runs
+.BR pre-stop ", " pre-backup " and " post-backup ,
+because two countdowns are worse than one and a second
+.B save\-on
+can restore saving halfway through the other console's archive. Provisioning
+.RB ( post-install ", " post-upgrade )
+goes to every installed console, so losing an election never leaves a machine
+with nothing that works.
+.PP
+.B mc plugins
+prints which console won:
+.PP
+.RS
+.nf
+console:  mgmt (priority 20) \(em elected
+console:  rcon (priority 10) \(em standing down
+.fi
+.RE
+.PP
+A fleet of mixed Minecraft versions therefore needs no per\-host configuration:
+the same two packages on every machine elect the management protocol where the
+server offers it and RCON everywhere else. See
+.BR mc-plugins (5).
+.SH HOOKS
+All of these are dispatched by core.
+.BR pre-stop ", " pre-backup " and " post-backup
+are subject to the election above;
+.BR post-install " and " post-upgrade
+run for every installed console.
+.TP
+.B pre-stop
+Stopping warns players. With at least one player online, or when the count
+cannot be determined, the stop is announced 5 minutes, 3 minutes and 1 minute
+before it happens. A provably empty server stops immediately.
+.IP
+The unit's
+.B TimeoutStopSec=
+is derived from that schedule plus the probe budget, and is asserted by a test.
+Re\-tiering the countdown without recomputing the value means a SIGKILL through
+the JVM's chunk flush.
+.TP
+.BR pre-backup ", " post-backup
+Backups are consistent. Autosave is switched off and the world is written to
+disk and waited for, then autosave is turned back on \(em whether or not the
+archive succeeded.
+.TP
+.BR post-install ", " post-upgrade
+The management endpoint is provisioned for a newly installed server, with a
+generated secret. This runs even when RCON is the elected console, so the
+machine is ready the day it is upgraded to a version that serves the protocol.
+.SH "PROTOCOL VERSIONS"
+The protocol is young and has changed shape. What mc uses is the part that has
+been stable throughout; this list is here so an operator reading a server
+changelog knows which entries matter.
+.TP
+.B 25w35a (1.21.9)
+Introduced. The management server, JSON\-RPC 2.0 over a WebSocket, and the
+methods mc's console parity rests on:
+.BR players ", " system_message ", " save ", " autosave ", " stop " and " status .
+This is the floor;
+.B mc mgmt
+requires 1.21.9 or newer and stands aside on anything older.
+.TP
+.B 25w37a
+Authentication by bearer secret, and TLS on by default. mc reads the secret
+from
+.B management-server-secret
+and sends it in an
+.B Authorization: Bearer
+header; because the endpoint it configures is loopback, it also sets
+.B management-server-tls-enabled=false
+and connects over
+.BR ws:// .
+An absent key means TLS is
+.IR on ,
+so the scheme is assumed to be
+.B wss://
+unless the server says otherwise.
+.TP
+.B "1.21.9 pre-release 1"
+The prefix on notification method names settled. mc issues requests and reads
+their results rather than subscribing, so this is inert here.
+.TP
+.B 25w41a
+.B server/activity
+added.
+.TP
+.B 25w42a
+.B management-server-allowed-origins
+added \(em an origin allowlist for the WebSocket handshake. It matters only when
+the endpoint is reached through a browser or a reverse proxy; mc's own client
+sends no
+.B Origin
+header.
+.TP
+.B 25w44a
+Game rule value types changed incompatibly. This is the break that keeps game
+rules out of
+.BR "mc mgmt" :
+nothing mc calls is affected, and adding them would mean branching on a protocol
+version.
+.TP
+.B "26.2 snapshot 5"
+The management server starts
+.I before
+the game server. A probe can therefore succeed while the world is still loading,
+which is a reason to read
+.B mc mgmt status
+rather than treat a successful connection as "the server is up".
+.TP
+.B "26.3 snapshot 1"
+World upgrade notifications added.
+.SH SECURITY
+The endpoint is authenticated by a
+.B 40\-character
+bearer secret held in
+.B management-server-secret
+in
+.IR /opt/minecraft/server.properties ,
+which is
+.B minecraft:minecraft 0640
+\(em readable by the service account and the
+.B minecraft
+group and nobody else. The secret is never passed on a command line:
+.I /proc/<pid>/cmdline
+is world\-readable and would expose it to every local user for the lifetime of
+the process.
+.PP
+.B mc
+configures a loopback endpoint with TLS off. On loopback there is no network
+path to intercept, and a self\-signed certificate would only add a trust store to
+maintain. That is a deployment choice rather than a limit of the protocol: the
+endpoint may be bound elsewhere and put behind a TLS\-terminating reverse proxy
+for other clients, in which case set
+.B management-server-allowed-origins
+so that a browser on another site cannot make a viewer's own credentials open a
+WebSocket to it. Unlike RCON, a non\-loopback endpoint here is reported rather
+than refused \(em there is a real credential on the connection.
+.PP
+There is no command\-string injection surface. Every call is a method name and
+typed parameters, so a player name, a ban reason or a broadcast is data at every
+layer; nothing mc sends is assembled by concatenation, and nothing it reads back
+has to be parsed out of prose.
+.PP
+Core still owns the managed keys of
+.IR server.properties .
+A modpack or any other writer of that file cannot switch the management server
+on with a secret of its own choosing: the keys are re\-applied after any merge.
+.SH FILES
+.TP
+.I /opt/minecraft/server.properties
+Holds
+.BR management-server-enabled ,
+.BR management-server-host ,
+.BR management-server-port ,
+.B management-server-secret
+and
+.BR management-server-tls-enabled .
+.BR "minecraft:minecraft 0640" .
+.TP
+.I /usr/lib/mc/plugins.d/mgmt.toml
+The manifest, including the console
+.B priority
+that decides the election.
+.TP
+.I /usr/libexec/mc/mc-mgmt
+The plugin executable. Invoked by mc, not by you.
+.SH SEE ALSO
+.BR mc (1),
+.BR mc-rcon (1),
+.BR mc-plugins (5),
+.BR mc-config (5)

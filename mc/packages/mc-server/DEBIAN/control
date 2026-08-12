@@ -1,0 +1,36 @@
+Package: mc-server
+Version: 1.0.0
+Architecture: any
+Maintainer: Dylan Bulmer <dylan@bulmer.dev>
+Depends: ${shlibs:Depends}
+Recommends: mc-rcon, mc-mgmt, mc-backup, mc-mrpack
+Suggests: man-db
+Section: admin
+Priority: optional
+Homepage: https://apt.bulmer.dev
+Description: Minecraft server lifecycle manager
+ mc manages a single Minecraft server instance on bare metal, or inside a VM,
+ LXC container or Docker image. It installs and upgrades Vanilla, Paper, Fabric
+ and NeoForge servers, drives the systemd lifecycle, and owns the server's
+ configuration.
+ .
+ Java (8, 17, 21 or 25) is selected automatically from the requested Minecraft
+ version, including Mojang's 26.x versioning scheme.
+ .
+ mc is plugin-first: a plugin is another .deb that drops a manifest into
+ /usr/lib/mc/plugins.d/ and contributes subcommands and lifecycle hooks. The
+ recommended set is mc-rcon and mc-mgmt (consoles, graceful shutdown), mc-backup
+ (backups and restores) and mc-mrpack (Modrinth modpacks). Run 'mc plugins' to
+ see what is installed.
+ .
+ Both consoles are recommended because mc elects between them per server: it
+ prefers mc-mgmt's management protocol where the server offers it and falls back
+ to mc-rcon everywhere else, so a stock install works against any version.
+ .
+ Installing a server requires accepting the Minecraft EULA, either interactively
+ or with 'mc install --accept-eula'. The server will not start until it has been.
+ .
+ Documented in mc(1), mc-config(5) and mc-plugins(5). 'mc man' opens the right
+ page for a command, including one a plugin contributed. man-db is only
+ suggested: the pages ship either way, and minimal images strip them in dpkg's
+ own configuration.

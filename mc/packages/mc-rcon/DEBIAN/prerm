@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+# The password file is left in place on remove: it is not this package's data,
+# and re-installing must not invalidate a secret the server is still using.
+# `mc delete` removes it with the rest of the server's secrets.
+exit 0

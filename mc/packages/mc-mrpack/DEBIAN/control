@@ -1,0 +1,18 @@
+Package: mc-mrpack
+Version: 1.0.0
+Architecture: any
+Maintainer: Dylan Bulmer <dylan@bulmer.dev>
+Depends: mc-server, ${shlibs:Depends}
+Section: admin
+Priority: optional
+Homepage: https://apt.bulmer.dev
+Description: Modrinth modpack support for mc-server
+ Lets 'mc install' and 'mc upgrade' take a Modrinth .mrpack file, which pins the
+ Minecraft version, the mod loader and every mod in one artifact.
+ .
+ A pack is attacker-controlled input handled as root, so every value in its
+ manifest is validated before use: file paths may not escape the server
+ directory, downloads must come from Modrinth's own CDN over https, and every
+ file must publish a sha512 that is verified after download. mc re-applies the
+ keys it owns in server.properties after a pack's own settings are merged, so a
+ pack cannot enable RCON with a password of its choosing.

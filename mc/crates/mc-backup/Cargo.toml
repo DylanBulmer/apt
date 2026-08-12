@@ -1,0 +1,27 @@
+[package]
+name = "mc-backup"
+description = "Backup and restore plugin for the mc Minecraft server manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# → /usr/libexec/mc/mc-backup. Keep the name in step with scripts/build.sh.
+[[bin]]
+name = "mc-backup"
+path = "src/main.rs"
+
+[dependencies]
+mc-common = { workspace = true }
+serde_json = "1"
+tar = "0.4"
+flate2 = "1"
+nix = { version = "0.30", features = ["user", "fs"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

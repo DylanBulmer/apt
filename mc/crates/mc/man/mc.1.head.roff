@@ -1,0 +1,80 @@
+.\" Everything in mc.1 above the command list. The .TH line and the COMMANDS
+.\" section are generated from the clap tree by `xtask man`; this file is the
+.\" prose a parser cannot know. Raw roff: it is emitted verbatim, so escape
+.\" literal hyphens as \- yourself.
+.SH NAME
+mc \- Minecraft server lifecycle manager
+.SH SYNOPSIS
+.B mc
+.I COMMAND
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B mc
+manages a single Minecraft server instance on bare metal, or inside a VM, LXC
+container or Docker image. It installs and upgrades Vanilla, Paper, Fabric and
+NeoForge servers, drives the systemd lifecycle, and owns the server's
+configuration. Java is selected from the Minecraft version being installed, and
+installed for you if it is missing.
+.PP
+There is one server per host. mc does not manage instances, because the thing
+it manages \(em a service account, a unit, a data directory, a port \(em is
+already singular on the machine.
+.SS Plugins
+Core installs, upgrades and runs the server. Everything else arrives as another
+.BR .deb :
+a plugin drops a manifest into
+.I /usr/lib/mc/plugins.d/
+and an executable into
+.IR /usr/libexec/mc/ ,
+and contributes subcommands, lifecycle hooks, or support for a new kind of
+server artifact.
+.B mc plugins
+lists what is installed and what each one adds; a command that needs a plugin
+you do not have names the package that provides it. See
+.BR mc-plugins (5)
+for the manifest format.
+.SS Configuration
+Two files, split by what they describe.
+.I /etc/minecraft/config.toml
+is
+.IR mc 's:
+which build to install, which Java, how much heap, how often to back up. See
+.BR mc-config (5).
+.PP
+.I /opt/minecraft/server.properties
+is the
+.IR server 's:
+port, seed, MOTD, difficulty, RCON. The JVM reads and rewrites that file, so mc
+keeps no copy of anything in it \(em edit it directly. mc re-applies only the
+keys it owns: the game port
+.RB ( server-port ),
+and both consoles' credentials
+.RB ( enable-rcon ,
+.BR rcon.port ,
+.BR rcon.password ,
+.BR management-server-enabled ,
+.BR management-server-host ,
+.BR management-server-port ,
+.BR management-server-secret ).
+They are re-applied after a modpack merges its own settings, so a pack cannot
+choose either console's credential, or switch one on with a secret of its own.
+.SS Privilege
+Commands that write the server directory, the config or the unit state need
+root. When you forget
+.BR sudo (8)
+and there is a terminal to prompt on, mc re-runs itself under it.
+.PP
+Read-only commands
+.RB ( status ,
+.BR logs ,
+.BR plugins ,
+.BR "rcon status" )
+need no root at all if you are in the
+.B minecraft
+group:
+.PP
+.RS
+.nf
+sudo usermod \-aG minecraft "$USER"
+.fi
+.RE

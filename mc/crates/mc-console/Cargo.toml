@@ -1,0 +1,18 @@
+[package]
+name = "mc-console"
+description = "Shared console policy for mc's server-console plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Linked by the console plugins only — mc, mc-backup and mc-mrpack never see
+# it. Split out of mc-common so that the contract every package depends on
+# stays "how mc runs a server", not "what a console does to one".
+[dependencies]
+mc-common = { workspace = true }
+
+[lints]
+workspace = true
