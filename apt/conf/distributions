@@ -4,6 +4,6 @@ Suite: stable
 Codename: stable
 Architectures: amd64 arm64
 Components: main
-ValidFor: 2w
+ValidFor: 14d
 Description: APT packages by Dylan Bulmer
 SignWith: default
