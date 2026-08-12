@@ -17,10 +17,8 @@ RUN chmod 755 /usr/local/bin/systemctl \
  && mkdir -p /run/systemd/system
 
 # Install the packages (core first, then plugins)
-# bash-completion ships a skeleton 'mc' completion for Midnight Commander;
-# --force-overwrite lets our real completion replace it.
 COPY dist/mc-server_*.deb /tmp/
-RUN dpkg --force-overwrite -i /tmp/mc-server_*.deb
+RUN dpkg -i /tmp/mc-server_*.deb
 
 COPY dist/mc-rcon_*.deb dist/mc-mgmt_*.deb dist/mc-backup_*.deb dist/mc-mrpack_*.deb /tmp/
 RUN dpkg -i /tmp/mc-rcon_*.deb /tmp/mc-mgmt_*.deb /tmp/mc-backup_*.deb /tmp/mc-mrpack_*.deb \
@@ -30,7 +28,7 @@ RUN dpkg -i /tmp/mc-rcon_*.deb /tmp/mc-mgmt_*.deb /tmp/mc-backup_*.deb /tmp/mc-m
 RUN echo 'root:root' | chpasswd
 
 # Generate completions with all plugins and install them
-RUN mc completions bash > /usr/share/bash-completion/completions/mc
+RUN mc completions bash > /usr/share/bash-completion/completions/mc-server
 
 # Source bash-completion for interactive shells
 RUN echo 'source /usr/share/bash-completion/bash_completion' >> /root/.bashrc

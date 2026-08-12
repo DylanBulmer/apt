@@ -12,7 +12,7 @@ use clap_complete::{Shell, generate};
 pub fn generate_shell(shell: Shell, out_dir: &Path) -> std::io::Result<()> {
     let mut command = mc::cli::Cli::command();
     let filename = match shell {
-        Shell::Bash => "mc",
+        Shell::Bash => "mc-server",
         Shell::Zsh => "_mc",
         // parse_shell in main.rs only returns Bash or Zsh, so this is
         // unreachable, but the match must be exhaustive.
